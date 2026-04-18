@@ -15,7 +15,8 @@ export const paths = {
   artifactsDir: path.join(appDir, "artifacts"),
   runsFile: path.join(appDir, "data", "runs.json"),
   datasetFile: path.join(appDir, "data", "dataset_FINAL_SAFE.csv"),
-  dashboardDatasetFile: path.join(workspaceRoot, "apps", "dashboard", "public", "dataset_FINAL_SAFE.csv")
+  dashboardDatasetFile: path.join(workspaceRoot, "apps", "dashboard", "public", "dataset_FINAL_SAFE.csv"),
+  buildDatasetFile: path.join(workspaceRoot, "apps", "dashboard", "build", "dataset_FINAL_SAFE.csv")
 };
 
 const csvColumns: Array<keyof PriceRow> = [
@@ -101,7 +102,7 @@ const parseCsv = (raw: string): PriceRow[] => {
 };
 
 export const loadDataset = async () => {
-  for (const candidate of [paths.datasetFile, paths.dashboardDatasetFile]) {
+  for (const candidate of [paths.dashboardDatasetFile, paths.datasetFile]) {
     try {
       const raw = await readFile(candidate, "utf8");
       return parseCsv(raw);
@@ -121,29 +122,14 @@ export const summarizeDataset = (rows: PriceRow[]): DatasetSummary => ({
 });
 
 export const mergeRows = (existingRows: PriceRow[], freshRows: PriceRow[]) => {
-  const keyed = new Map<string, PriceRow>();
-
-  [...existingRows, ...freshRows].forEach((row) => {
-    const key = [
-      row.pickup_date,
-      row.dropoff_date,
-      row.location,
-      row.company,
-      row.vehicle,
-      row.price,
-      row.scrape_date,
-      row.type
-    ].join("|");
-    keyed.set(key, row);
-  });
-
-  return Array.from(keyed.values()).sort((left, right) =>
+  return [...existingRows, ...freshRows].sort((left, right) =>
     [
       left.pickup_date,
       left.dropoff_date,
       left.location,
       left.company,
-      left.vehicle
+      left.vehicle,
+      left.scrape_date
     ]
       .join("|")
       .localeCompare(
@@ -152,7 +138,8 @@ export const mergeRows = (existingRows: PriceRow[], freshRows: PriceRow[]) => {
           right.dropoff_date,
           right.location,
           right.company,
-          right.vehicle
+          right.vehicle,
+          right.scrape_date
         ].join("|")
       )
   );
@@ -164,8 +151,13 @@ export const writeDataset = async (rows: PriceRow[]) => {
     columns: csvColumns
   });
 
-  await writeFile(paths.datasetFile, csv, "utf8");
   await writeFile(paths.dashboardDatasetFile, csv, "utf8");
+  await writeFile(paths.datasetFile, csv, "utf8");
+  try {
+    await writeFile(paths.buildDatasetFile, csv, "utf8");
+  } catch {
+    // The build output is optional in development.
+  }
 };
 
 export const writeRunArtifact = async (runId: string, rows: PriceRow[], warnings: string[]) => {

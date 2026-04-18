@@ -34,6 +34,12 @@ const vehicleRules: VehicleRule[] = [
     matchAll: ["jucy", "condo"]
   },
   {
+    company: "jucy",
+    vehicle: "crib",
+    type: "competitor",
+    matchAll: ["jucy", "crib"]
+  },
+  {
     company: "spaceships",
     vehicle: "beta2s",
     type: "competitor",
@@ -92,6 +98,12 @@ const vehicleRules: VehicleRule[] = [
     vehicle: "aventus2",
     type: "competitor",
     matchAll: ["aventus"]
+  },
+  {
+    company: "campervanvillage",
+    vehicle: "aventus2",
+    type: "competitor",
+    matchAll: ["aventus", "plus"]
   },
   {
     company: "elementsworld",

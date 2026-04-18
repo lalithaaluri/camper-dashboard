@@ -7,10 +7,19 @@ import type { DepotCode, PriceRow, ScrapeRequest, ScrapeRunResult } from "./type
 
 const SEARCH_TIMEOUT_MS = 20_000;
 const RESULTS_TIMEOUT_MS = 30_000;
+const SEARCH_FORM_SELECTOR = "form[action='/widget/book/search']";
 
 const cleanPrice = (value: string) => {
-  const numeric = Number(value.replace(/[^\d.]/g, ""));
-  return Number.isFinite(numeric) ? numeric : null;
+  const matches = value.match(/\d+(?:\.\d+)?/g) || [];
+  const values = matches
+    .map((entry) => Number(entry))
+    .filter((entry) => Number.isFinite(entry) && entry > 0);
+
+  if (!values.length) {
+    return null;
+  }
+
+  return Math.min(...values);
 };
 
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -25,6 +34,14 @@ const isVisible = async (locator: Locator) => {
   } catch {
     return false;
   }
+};
+
+const escapeForRegExp = (value: string) =>
+  value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const formatDisplayDate = (value: string) => {
+  const [year, month, day] = value.split("-");
+  return `${day}/${month}/${year}`;
 };
 
 const tryFill = async (locator: Locator, value: string) => {
@@ -48,67 +65,167 @@ const tryFill = async (locator: Locator, value: string) => {
   }
 };
 
-const fillLocationField = async (page: Page, depot: DepotCode) => {
-  const label = DEPOTS[depot].label;
-  const candidates = [
-    page.getByLabel(/pick\s*up\s*location/i),
-    page.getByLabel(/location/i),
-    page.locator("select[name*='location']"),
-    page.locator("input[name*='location']"),
-    page.locator("select"),
-    page.locator("input[placeholder*='Location' i]")
-  ];
+const setSelectizeValue = async (
+  page: Page,
+  selector: string,
+  optionLabel: string,
+  allowSameAsPickup = false
+) =>
+  page.evaluate(
+    ({ selector, optionLabel, allowSameAsPickup }) => {
+      const select = document.querySelector(selector) as
+        | (HTMLSelectElement & { selectize?: Record<string, unknown> })
+        | null;
 
-  for (const candidate of candidates) {
-    if (await tryFill(candidate, label)) {
+      if (!select?.selectize) {
+        return false;
+      }
+
+      const selectize = select.selectize as {
+        getValue: () => string;
+        setValue: (value: string) => void;
+      };
+
+      const raw = select.getAttribute("data-options");
+      const groups = raw
+        ? (JSON.parse(raw) as Array<{
+            L: string;
+            V?: string | number;
+            O?: Array<{ L: string; V: string | number }>;
+          }>)
+        : [];
+
+      if (!groups.length) {
+        return false;
+      }
+
+      let directValue: string | null = null;
+      for (const group of groups) {
+        if (group.L === optionLabel && typeof group.V !== "undefined") {
+          directValue = String(group.V);
+          break;
+        }
+      }
+
+      if (directValue !== null) {
+        selectize.setValue(directValue);
+        return selectize.getValue() === directValue;
+      }
+
+      if (allowSameAsPickup) {
+        for (const group of groups) {
+          if (group.L === "Same as Pick Up" && typeof group.V !== "undefined") {
+            const sameAsPickupValue = String(group.V);
+            selectize.setValue(sameAsPickupValue);
+            return selectize.getValue() === sameAsPickupValue;
+          }
+        }
+      }
+
+      let matchingGroupLabel: string | null = null;
+      let matchingOptionValue: string | null = null;
+      for (const group of groups) {
+        if (!Array.isArray(group.O)) {
+          continue;
+        }
+
+        for (const option of group.O) {
+          if (option.L === optionLabel) {
+            matchingGroupLabel = group.L;
+            matchingOptionValue = String(option.V);
+            break;
+          }
+        }
+
+        if (matchingGroupLabel && matchingOptionValue) {
+          break;
+        }
+      }
+
+      if (!matchingGroupLabel || !matchingOptionValue) {
+        return false;
+      }
+
+      selectize.setValue(matchingGroupLabel);
+      selectize.setValue(matchingOptionValue);
+
+      return selectize.getValue() === matchingOptionValue;
+    },
+    { selector, optionLabel, allowSameAsPickup }
+  );
+
+const fillBookingWidget = async (
+  page: Page,
+  depot: DepotCode,
+  pickupDate: string,
+  dropoffDate: string
+) => {
+  const pickupLabel = DEPOTS[depot].label;
+
+  const pickupSet = await setSelectizeValue(
+    page,
+    `${SEARCH_FORM_SELECTOR} select[name="Parameters.LocationFrom"]`,
+    pickupLabel
+  );
+  const dropoffSet = await setSelectizeValue(
+    page,
+    `${SEARCH_FORM_SELECTOR} select[name="Parameters.LocationTo"]`,
+    pickupLabel,
+    true
+  );
+
+  const datesSet = await page.evaluate(
+    ({ pickupDate, dropoffDate, pickupDisplayDate, dropoffDisplayDate, formSelector }) => {
+      const form = document.querySelector(formSelector);
+      if (!form) {
+        return false;
+      }
+
+      const hiddenPickup = form.querySelector('input[name="Parameters.DateFrom"]') as HTMLInputElement | null;
+      const hiddenDropoff = form.querySelector('input[name="Parameters.DateTo"]') as HTMLInputElement | null;
+      const visiblePickup = form.querySelector(".display-fr") as HTMLInputElement | null;
+      const visibleDropoff = form.querySelector(".display-to") as HTMLInputElement | null;
+
+      if (!hiddenPickup || !hiddenDropoff || !visiblePickup || !visibleDropoff) {
+        return false;
+      }
+
+      hiddenPickup.value = pickupDate;
+      hiddenDropoff.value = dropoffDate;
+      visiblePickup.value = pickupDisplayDate;
+      visibleDropoff.value = dropoffDisplayDate;
+
+      for (const field of [hiddenPickup, hiddenDropoff, visiblePickup, visibleDropoff]) {
+        field.dispatchEvent(new Event("input", { bubbles: true }));
+        field.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+
       return true;
+    },
+    {
+      pickupDate,
+      dropoffDate,
+      pickupDisplayDate: formatDisplayDate(pickupDate),
+      dropoffDisplayDate: formatDisplayDate(dropoffDate),
+      formSelector: SEARCH_FORM_SELECTOR
     }
-  }
+  );
 
-  return false;
-};
-
-const fillDateField = async (page: Page, value: string, kind: "pickup" | "dropoff") => {
-  const regex = kind === "pickup" ? /pick\s*up/i : /drop\s*off/i;
-  const candidates = [
-    page.getByLabel(regex),
-    page.locator(`input[name*='${kind === "pickup" ? "pick" : "drop"}']`),
-    page.locator(`input[id*='${kind === "pickup" ? "pick" : "drop"}']`),
-    page.locator(`input[placeholder*='${kind === "pickup" ? "Pick" : "Drop"}' i]`),
-    page.locator("input[type='date']")
-  ];
-
-  for (const candidate of candidates) {
-    if (await tryFill(candidate, value)) {
-      return true;
-    }
-  }
-
-  return false;
+  return pickupSet && dropoffSet && datesSet;
 };
 
 const submitSearch = async (page: Page) => {
-  const buttons = [
-    page.getByRole("button", { name: /search|find|quote/i }),
-    page.locator("button[type='submit']"),
-    page.locator("input[type='submit']"),
-    page.locator("form button")
-  ];
-
-  for (const button of buttons) {
-    if (!(await isVisible(button))) {
-      continue;
-    }
-
-    try {
-      await button.first().click();
-      return true;
-    } catch {
-      continue;
-    }
+  const button = page.locator(`${SEARCH_FORM_SELECTOR} button.button-search`).first();
+  if (!(await isVisible(button))) {
+    return false;
   }
 
-  return false;
+  try {
+    await button.click();
+    return true;
+  } catch {
+    return false;
+  }
 };
 
 const dismissOverlays = async (page: Page) => {
@@ -130,11 +247,28 @@ const dismissOverlays = async (page: Page) => {
 };
 
 const waitForResults = async (page: Page) => {
+  await page.waitForURL(
+    new RegExp(`${escapeForRegExp(BASE_URL)}/bookings/\\?__p=book_search_`, "i"),
+    { timeout: RESULTS_TIMEOUT_MS }
+  );
   await page.waitForLoadState("domcontentloaded", { timeout: SEARCH_TIMEOUT_MS });
   await page.waitForLoadState("networkidle", { timeout: SEARCH_TIMEOUT_MS }).catch(() => undefined);
-
-  const resultLocator = page.locator(".price-label, [class*='price-label']");
-  await resultLocator.first().waitFor({ timeout: RESULTS_TIMEOUT_MS });
+  await page.waitForFunction(
+    () =>
+      Array.from(document.querySelectorAll(".price-label, [class*='price-label']")).some((node) => {
+        const element = node as HTMLElement;
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+        return (
+          rect.width > 0 &&
+          rect.height > 0 &&
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          style.opacity !== "0"
+        );
+      }),
+    { timeout: RESULTS_TIMEOUT_MS }
+  );
 };
 
 const collectCurrentPageRows = async (
@@ -144,14 +278,24 @@ const collectCurrentPageRows = async (
   depot: DepotCode,
   scrapeDate: string
 ) => {
-  const blocks = page.locator(".price-label, [class*='price-label']");
-  const count = await blocks.count();
-  const rows: PriceRow[] = [];
+  const payloads = await page.evaluate(() =>
+    Array.from(document.querySelectorAll(".price-label, [class*='price-label']")).flatMap((node) => {
+      const element = node as HTMLElement;
+      const rect = element.getBoundingClientRect();
+      const style = window.getComputedStyle(element);
 
-  for (let index = 0; index < count; index += 1) {
-    const payload = await blocks.nth(index).evaluate((node) => {
-      const priceText = node.textContent || "";
-      let current: HTMLElement | null = node.parentElement;
+      if (
+        rect.width === 0 ||
+        rect.height === 0 ||
+        style.display === "none" ||
+        style.visibility === "hidden" ||
+        style.opacity === "0"
+      ) {
+        return [];
+      }
+
+      const priceText = element.textContent || "";
+      let current: HTMLElement | null = element.parentElement;
       let fullText = "";
 
       for (let hops = 0; hops < 10 && current; hops += 1) {
@@ -162,29 +306,31 @@ const collectCurrentPageRows = async (
         current = current.parentElement;
       }
 
-      return { priceText, fullText };
-    });
+      return [{ priceText, fullText }];
+    })
+  );
 
+  return payloads.flatMap((payload) => {
     const price = cleanPrice(payload.priceText);
     const match = identifyVehicle(payload.fullText);
 
     if (!price || !match) {
-      continue;
+      return [];
     }
 
-    rows.push({
-      pickup_date: pickupDate,
-      dropoff_date: dropoffDate,
-      location: depot,
-      company: match.company,
-      vehicle: match.vehicle,
-      price,
-      scrape_date: scrapeDate,
-      type: match.type
-    });
-  }
-
-  return rows;
+    return [
+      {
+        pickup_date: pickupDate,
+        dropoff_date: dropoffDate,
+        location: depot,
+        company: match.company,
+        vehicle: match.vehicle,
+        price,
+        scrape_date: scrapeDate,
+        type: match.type
+      }
+    ];
+  });
 };
 
 const nextPage = async (page: Page) => {
@@ -233,13 +379,12 @@ const scrapeQuoteSet = async (
 ) => {
   await page.goto(BASE_URL, { waitUntil: "domcontentloaded", timeout: SEARCH_TIMEOUT_MS });
   await dismissOverlays(page);
+  await page.locator(SEARCH_FORM_SELECTOR).first().waitFor({ timeout: SEARCH_TIMEOUT_MS });
 
-  const locationReady = await fillLocationField(page, depot);
-  const pickupReady = await fillDateField(page, pickupDate, "pickup");
-  const dropoffReady = await fillDateField(page, dropoffDate, "dropoff");
+  const widgetReady = await fillBookingWidget(page, depot, pickupDate, dropoffDate);
   const submitted = await submitSearch(page);
 
-  if (!locationReady || !pickupReady || !dropoffReady || !submitted) {
+  if (!widgetReady || !submitted) {
     warnings.push(
       `Unable to fully automate the search form for ${depot} ${pickupDate} -> ${dropoffDate}.`
     );
@@ -317,11 +462,44 @@ export const runAutomatedScrape = async (
       }
     }
   } catch (error) {
-    await page.screenshot({
-      path: path.join(paths.artifactsDir, `${runId}-error.png`),
-      fullPage: true
-    });
-    throw error;
+    const originalMessage =
+      error instanceof Error ? error.message : "Unknown scraping error";
+    const diagnostics: string[] = [];
+
+    try {
+      await writeFile(
+        path.join(paths.artifactsDir, `${runId}-error.html`),
+        await page.content(),
+        "utf8"
+      );
+      diagnostics.push(`${runId}-error.html`);
+    } catch (artifactError) {
+      diagnostics.push(
+        `html-capture-failed: ${
+          artifactError instanceof Error ? artifactError.message : "unknown error"
+        }`
+      );
+    }
+
+    try {
+      await page.screenshot({
+        path: path.join(paths.artifactsDir, `${runId}-error.png`),
+        fullPage: true
+      });
+      diagnostics.push(`${runId}-error.png`);
+    } catch (artifactError) {
+      diagnostics.push(
+        `screenshot-failed: ${
+          artifactError instanceof Error ? artifactError.message : "unknown error"
+        }`
+      );
+    }
+
+    throw new Error(
+      diagnostics.length
+        ? `${originalMessage} | diagnostics: ${diagnostics.join(", ")}`
+        : originalMessage
+    );
   } finally {
     await context.close();
     await browser.close();

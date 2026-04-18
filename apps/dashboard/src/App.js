@@ -126,6 +126,35 @@ const formatCurrency = (value) => {
   }).format(value);
 };
 
+export const compareScrapeDates = (left, right) => {
+  const leftTime = left instanceof Date ? left.getTime() : Number.NEGATIVE_INFINITY;
+  const rightTime = right instanceof Date ? right.getTime() : Number.NEGATIVE_INFINITY;
+  return leftTime - rightTime;
+};
+
+export const selectLatestRowsBySnapshot = (rows) => {
+  const latestByKey = new Map();
+
+  rows.forEach((row) => {
+    const key = [
+      row.dateKey,
+      row.dropoffDate,
+      row.location,
+      row.company,
+      row.vehicle,
+      row.type,
+      row.tripDays ?? ""
+    ].join("|");
+    const current = latestByKey.get(key);
+
+    if (!current || compareScrapeDates(row.scrapeDate, current.scrapeDate) >= 0) {
+      latestByKey.set(key, row);
+    }
+  });
+
+  return Array.from(latestByKey.values());
+};
+
 const formatCount = (value) =>
   new Intl.NumberFormat("en-NZ", {
     maximumFractionDigits: 0
@@ -664,23 +693,7 @@ function App() {
               Number.isFinite(row.price)
           );
 
-        const uniqueRows = Array.from(
-          new Map(
-            cleanedRows.map((row) => [
-              [
-                row.dateKey,
-                row.dropoffDate,
-                row.location,
-                row.company,
-                row.vehicle,
-                row.price
-              ].join("|"),
-              row
-            ])
-          ).values()
-        );
-
-        setRows(uniqueRows);
+        setRows(cleanedRows);
         setLoading(false);
       },
       error: () => {
@@ -737,6 +750,7 @@ function App() {
     }
 
     const config = vehicleConfigs[vehicle];
+    const relevantRows = [];
     const grouped = new Map();
 
     rows.forEach((row) => {
@@ -757,6 +771,12 @@ function App() {
         return;
       }
 
+      relevantRows.push(row);
+    });
+
+    selectLatestRowsBySnapshot(relevantRows).forEach((row) => {
+      const isElementsRow =
+        row.company === "elementsworld" && config.elementsVehicles.includes(row.vehicle);
       const key = row.dateKey;
       if (!grouped.has(key)) {
         grouped.set(key, {
