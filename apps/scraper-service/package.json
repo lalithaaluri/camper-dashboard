@@ -1,0 +1,27 @@
+{
+  "name": "scraper-service",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/server.ts",
+    "lint": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test --import tsx --test-reporter=spec src/**/*.test.ts"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "csv-stringify": "^6.5.2",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "playwright": "^1.55.0",
+    "zod": "^4.1.11"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.7.2",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}

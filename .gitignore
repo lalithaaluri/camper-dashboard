@@ -10,6 +10,12 @@
 
 # production
 /build
+/apps/*/build
+/apps/*/dist
+/apps/*/node_modules
+/apps/scraper-service/artifacts/*
+/apps/scraper-service/data/*
+!/apps/scraper-service/data/.gitkeep
 
 # misc
 .DS_Store
