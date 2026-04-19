@@ -62,6 +62,8 @@ const initialDashboard = {
     lowest: 0,
     average: 0,
     highest: 0,
+    cheapestRow: null,
+    highestRow: null,
     elements: null,
     recommended: 0,
     spread: 0,
@@ -153,6 +155,254 @@ export const selectLatestRowsBySnapshot = (rows) => {
   });
 
   return Array.from(latestByKey.values());
+};
+
+
+const collectBucketMetrics = (bucket) => {
+  const elementsRows = bucket?.elementsRows || [];
+  const validDurations = new Set(
+    elementsRows
+      .map((row) => row.tripDays)
+      .filter((tripDays) => tripDays !== null && tripDays !== undefined)
+  );
+  const competitorRows =
+    bucket?.competitorCandidates.filter((row) => validDurations.has(row.tripDays)) || [];
+  const competitorPrices = competitorRows.map((row) => row.price);
+  const elementsPrices = elementsRows.map((row) => row.price);
+  const cheapestRow = competitorRows.length
+    ? competitorRows.reduce((min, row) => (row.price < min.price ? row : min))
+    : null;
+  const highestRow = competitorRows.length
+    ? competitorRows.reduce((max, row) => (row.price > max.price ? row : max))
+    : null;
+
+  return {
+    elementsRows,
+    competitorRows,
+    competitorPrices,
+    elementsPrices,
+    cheapestRow,
+    highestRow,
+    lowest: cheapestRow ? cheapestRow.price : null,
+    highest: highestRow ? highestRow.price : null,
+    average: competitorPrices.length ? averageFrom(competitorPrices) : null,
+    elements: elementsPrices.length ? averageFrom(elementsPrices) : null
+  };
+};
+
+const calculateRecommendedPrice = (lowest, average, adjustment) => {
+  if (lowest === null || lowest === undefined || Number.isNaN(lowest)) {
+    return 0;
+  }
+
+  const candidate = lowest * (1 + adjustment / 100);
+
+  if (average === null || average === undefined || Number.isNaN(average)) {
+    return candidate;
+  }
+
+  return Math.min(candidate, average);
+};
+
+const formatCompetitorLabel = (row) =>
+  row ? `${row.company} - ${row.vehicle} (${formatCurrency(row.price)})` : "No competitor data";
+
+export const formatDiffVsElements = (diff) => {
+  if (diff === null || diff === undefined || Number.isNaN(diff)) {
+    return "No data";
+  }
+
+  if (diff > 0) {
+    return `+${formatCurrency(diff)} (More expensive)`;
+  }
+
+  if (diff < 0) {
+    return `-${formatCurrency(Math.abs(diff))} (Cheaper)`;
+  }
+
+  return `${formatCurrency(0)} (Same price)`;
+};
+
+const groupRelevantRows = (rows, config) => {
+  const grouped = new Map();
+
+  rows.forEach((row) => {
+    const isElementsRow =
+      row.company === "elementsworld" && config.elementsVehicles.includes(row.vehicle);
+    const isCompetitorRow =
+      row.company !== "elementsworld" && config.competitorVehicles.includes(row.vehicle);
+
+    if (!isElementsRow && !isCompetitorRow) {
+      return;
+    }
+
+    const key = row.dateKey;
+    if (!grouped.has(key)) {
+      grouped.set(key, {
+        dateKey: key,
+        elementsRows: [],
+        competitorCandidates: []
+      });
+    }
+
+    const bucket = grouped.get(key);
+    if (!bucket) {
+      return;
+    }
+
+    if (isElementsRow) {
+      bucket.elementsRows.push(row);
+      return;
+    }
+
+    bucket.competitorCandidates.push(row);
+  });
+
+  return grouped;
+};
+
+export const buildDashboardFromRows = ({
+  rows,
+  config,
+  adjustment,
+  selectedDate = ""
+}) => {
+  if (!rows.length) {
+    return initialDashboard;
+  }
+
+  const grouped = groupRelevantRows(rows, config);
+
+  const sortedDates = Array.from(grouped.keys()).sort();
+  const trend = sortedDates.map((dateKey) => {
+    const bucketMetrics = collectBucketMetrics(grouped.get(dateKey));
+
+    return {
+      dateKey,
+      lowest: bucketMetrics.lowest,
+      highest: bucketMetrics.highest,
+      cheapestRow: bucketMetrics.cheapestRow,
+      highestRow: bucketMetrics.highestRow,
+      elements: bucketMetrics.elements,
+      recommended:
+        bucketMetrics.lowest === null
+          ? null
+          : calculateRecommendedPrice(
+              bucketMetrics.lowest,
+              bucketMetrics.average,
+              adjustment
+            ),
+      competitorCount: bucketMetrics.competitorRows.length
+    };
+  });
+
+  const latestDate = sortedDates.length ? sortedDates[sortedDates.length - 1] : "";
+  const selectedMetrics = selectedDate
+    ? collectBucketMetrics(grouped.get(selectedDate))
+    : null;
+  const latestMetrics = latestDate
+    ? collectBucketMetrics(grouped.get(latestDate))
+    : null;
+
+  let snapshotMetrics = latestMetrics;
+  let latestRows = latestMetrics ? [...latestMetrics.competitorRows] : [];
+  let displayDate = latestDate;
+
+  if (selectedDate) {
+    snapshotMetrics = selectedMetrics;
+    latestRows = selectedMetrics ? [...selectedMetrics.competitorRows] : [];
+    displayDate = selectedDate;
+  } else if (!latestRows.length) {
+    latestRows = sortedDates.flatMap((dateKey) => {
+      const bucketMetrics = collectBucketMetrics(grouped.get(dateKey));
+      return bucketMetrics.competitorRows;
+    });
+    snapshotMetrics = {
+      elementsPrices: sortedDates.flatMap((dateKey) => {
+        const bucketMetrics = collectBucketMetrics(grouped.get(dateKey));
+        return bucketMetrics.elementsPrices;
+      })
+    };
+    displayDate = latestDate || "";
+  }
+
+  latestRows.sort((left, right) => {
+    if (left.dateKey !== right.dateKey) {
+      return left.dateKey.localeCompare(right.dateKey);
+    }
+
+    return left.price - right.price;
+  });
+
+  const competitorPrices = latestRows.map((row) => row.price);
+  const latestAverage = competitorPrices.length ? averageFrom(competitorPrices) : 0;
+  const latestElements = snapshotMetrics?.elementsPrices?.length
+    ? averageFrom(snapshotMetrics.elementsPrices)
+    : null;
+  const cheapestRow = latestRows.length
+    ? latestRows.reduce((min, row) => (row.price < min.price ? row : min))
+    : null;
+  const highestRow = latestRows.length
+    ? latestRows.reduce((max, row) => (row.price > max.price ? row : max))
+    : null;
+  const lowest = cheapestRow ? cheapestRow.price : 0;
+  const highest = highestRow ? highestRow.price : 0;
+  const recommended = competitorPrices.length
+    ? calculateRecommendedPrice(lowest, latestAverage, adjustment)
+    : 0;
+  const spread = highest - lowest;
+  const upliftValue = recommended - lowest;
+  const observedQuotes = trend.reduce(
+    (sum, item) => sum + item.competitorCount,
+    0
+  );
+
+  const companyMap = latestRows.reduce((accumulator, row) => {
+    const current = accumulator.get(row.company) || {
+      company: row.company,
+      prices: [],
+      vehicles: new Set()
+    };
+
+    current.prices.push(row.price);
+    current.vehicles.add(row.vehicle);
+    accumulator.set(row.company, current);
+    return accumulator;
+  }, new Map());
+
+  const companyStats = Array.from(companyMap.values())
+    .map((entry) => ({
+      company: entry.company,
+      average: averageFrom(entry.prices),
+      vehicles: Array.from(entry.vehicles).join(", "),
+      count: entry.prices.length
+    }))
+    .sort((left, right) => left.average - right.average);
+
+  return {
+    summary: {
+      lowest,
+      average: latestAverage,
+      highest,
+      cheapestRow,
+      highestRow,
+      elements: latestElements,
+      recommended,
+      spread,
+      upliftValue,
+      upliftPercent: adjustment,
+      competitorCount: latestRows.length,
+      trackedDates: trend.length,
+      observedQuotes
+    },
+    trend,
+    latestRows,
+    companyStats,
+    latestDate,
+    latestDateLabel: displayDate
+      ? formatDateLabel(displayDate, { year: "numeric" })
+        : "No snapshot yet"
+  };
 };
 
 const formatCount = (value) =>
@@ -247,10 +497,11 @@ function PriceTrendChart({ data }) {
         }
 
         const elementsData = data.filter((item) => item.elements !== null);
-        const averageData = data.filter((item) => item.average !== null);
+        const lowestData = data.filter((item) => item.lowest !== null);
+        const highestData = data.filter((item) => item.highest !== null);
         const recommendedData = data.filter((item) => item.recommended !== null);
         const values = data.flatMap((item) =>
-          [item.elements, item.average, item.recommended].filter(
+          [item.elements, item.lowest, item.highest, item.recommended].filter(
             (entry) => entry !== null && entry !== undefined
           )
         );
@@ -333,7 +584,8 @@ function PriceTrendChart({ data }) {
                   const centerX = xScale(item.dateKey) ?? innerWidth / 2;
                   const series = [
                     { key: "elements", value: item.elements, fill: "#2d6a4f" },
-                    { key: "average", value: item.average, fill: "#c96c34" },
+                    { key: "lowest", value: item.lowest, fill: "#c96c34" },
+                    { key: "highest", value: item.highest, fill: "#d8a15d" },
                     {
                       key: "recommended",
                       value: item.recommended,
@@ -352,21 +604,38 @@ function PriceTrendChart({ data }) {
                     const x = startX + index * (barWidth + gap);
                     const y = yScale(value);
                     const barHeight = innerHeight - y;
+                    const tooltip = (() => {
+                      if (entry.key === "lowest") {
+                        return `Cheapest: ${formatCompetitorLabel(item.cheapestRow)}`;
+                      }
+
+                      if (entry.key === "highest") {
+                        return `Highest: ${formatCompetitorLabel(item.highestRow)}`;
+                      }
+
+                      if (entry.key === "elements") {
+                        return `Elements: ${formatCurrency(item.elements)}`;
+                      }
+
+                      return `Recommended: ${formatCurrency(item.recommended)}`;
+                    })();
 
                     return (
-                      <Bar
-                        key={entry.key}
-                        x={x}
-                        y={y}
-                        width={barWidth}
-                        height={barHeight}
-                        rx={12}
-                        fill={entry.fill}
-                        stroke={entry.fill}
-                        strokeWidth={entry.dash ? 2 : 0}
-                        fillOpacity={entry.dash ? 0.14 : 0.92}
-                        strokeDasharray={entry.dash}
-                      />
+                      <g key={entry.key}>
+                        <title>{tooltip}</title>
+                        <Bar
+                          x={x}
+                          y={y}
+                          width={barWidth}
+                          height={barHeight}
+                          rx={12}
+                          fill={entry.fill}
+                          stroke={entry.fill}
+                          strokeWidth={entry.dash ? 2 : 0}
+                          fillOpacity={entry.dash ? 0.14 : 0.92}
+                          strokeDasharray={entry.dash}
+                        />
+                      </g>
                     );
                   });
                 })()
@@ -381,11 +650,19 @@ function PriceTrendChart({ data }) {
                     strokeWidth={3}
                   />
                   <LinePath
-                    data={averageData}
+                    data={lowestData}
                     curve={curveMonotoneX}
                     x={(item) => xScale(item.dateKey) ?? 0}
-                    y={(item) => yScale(item.average)}
+                    y={(item) => yScale(item.lowest)}
                     stroke="#c96c34"
+                    strokeWidth={3}
+                  />
+                  <LinePath
+                    data={highestData}
+                    curve={curveMonotoneX}
+                    x={(item) => xScale(item.dateKey) ?? 0}
+                    y={(item) => yScale(item.highest)}
+                    stroke="#d8a15d"
                     strokeWidth={3}
                   />
                   <LinePath
@@ -400,10 +677,28 @@ function PriceTrendChart({ data }) {
 
                   {data.map((item) => {
                     const x = xScale(item.dateKey) ?? 0;
+                    const tooltip = [
+                      `Date: ${formatDateLabel(item.dateKey, { year: "numeric" })}`,
+                      `Cheapest: ${formatCompetitorLabel(item.cheapestRow)}`,
+                      `Highest: ${formatCompetitorLabel(item.highestRow)}`,
+                      `Elements: ${formatCurrency(item.elements)}`
+                    ].join("\n");
                     return (
                       <g key={item.dateKey}>
-                        {item.average !== null ? (
-                          <circle cx={x} cy={yScale(item.average)} r={4} fill="#c96c34" />
+                        <rect
+                          x={x - 18}
+                          y={0}
+                          width={36}
+                          height={innerHeight}
+                          fill="transparent"
+                        >
+                          <title>{tooltip}</title>
+                        </rect>
+                        {item.lowest !== null ? (
+                          <circle cx={x} cy={yScale(item.lowest)} r={4} fill="#c96c34" />
+                        ) : null}
+                        {item.highest !== null ? (
+                          <circle cx={x} cy={yScale(item.highest)} r={4} fill="#d8a15d" />
                         ) : null}
                         {item.elements !== null ? (
                           <circle cx={x} cy={yScale(item.elements)} r={4} fill="#2d6a4f" />
@@ -421,73 +716,75 @@ function PriceTrendChart({ data }) {
   );
 }
 
-function MarketSpreadChart({ rows, recommended, elements }) {
+function MarketSpreadChart({
+  lowest,
+  highest,
+  recommended,
+  elements,
+  cheapestRow,
+  highestRow
+}) {
   return (
     <ParentSize debounceTime={10}>
       {({ width }) => {
         const safeWidth = Math.max(width, 320);
-        const visibleRows = rows.slice(0, 8);
         const height = 388;
         const margin = { top: 24, right: 24, bottom: 112, left: 58 };
         const innerWidth = safeWidth - margin.left - margin.right;
         const innerHeight = height - margin.top - margin.bottom;
 
-        if (!rows.length || innerWidth <= 0 || innerHeight <= 0) {
+        if (
+          innerWidth <= 0 ||
+          innerHeight <= 0 ||
+          [lowest, highest, recommended, elements].every(
+            (value) => value === null || value === undefined || Number.isNaN(value)
+          )
+        ) {
           return <div className="chart-empty">Competitor spread will appear for the latest market date.</div>;
         }
 
-        const series = ["competitor", "elements", "recommended"].filter((key) => {
-          if (key === "elements") {
-            return elements !== null && elements !== undefined;
+        const groupData = [
+          {
+            label: "Cheapest",
+            value: lowest,
+            fill: "#c96c34",
+            tooltip: `Cheapest: ${formatCompetitorLabel(cheapestRow)}`
+          },
+          {
+            label: "Highest",
+            value: highest,
+            fill: "#d8a15d",
+            tooltip: `Highest: ${formatCompetitorLabel(highestRow)}`
+          },
+          {
+            label: "Elements",
+            value: elements,
+            fill: "#6c8a72",
+            tooltip: `Elements: ${formatCurrency(elements)}`
+          },
+          {
+            label: "Recommended",
+            value: recommended,
+            fill: "#1b4332",
+            tooltip: `Recommended: ${formatCurrency(recommended)}`
           }
-
-          if (key === "recommended") {
-            return recommended !== null && recommended !== undefined;
-          }
-
-          return true;
-        });
-        const groupData = visibleRows.map((row) => ({
-          label: `${row.company} ${row.vehicle}`.trim(),
-          competitor: row.price,
-          elements,
-          recommended
-        }));
-        const x0Scale = scaleBand({
+        ].filter((item) => item.value !== null && item.value !== undefined);
+        const xScale = scaleBand({
           domain: groupData.map((item) => item.label),
           range: [0, innerWidth],
-          padding: 0.26
-        });
-        const x1Scale = scaleBand({
-          domain: series,
-          range: [0, x0Scale.bandwidth()],
-          padding: 0.14
+          padding: 0.32
         });
         const yScale = scaleLinear({
           domain: [
             0,
             Math.max(
-              ...groupData.flatMap((item) =>
-                series
-                  .map((key) => item[key])
-                  .filter((value) => value !== null && value !== undefined)
-              ),
+              ...groupData.map((item) => item.value),
               0
             ) * 1.18
           ],
           range: [innerHeight, 0],
           nice: true
         });
-        const fills = {
-          competitor: "#c96c34",
-          elements: "#6c8a72",
-          recommended: "#1b4332"
-        };
-        const labels = {
-          competitor: "Competitor",
-          elements: "Elements",
-          recommended: "Recommended"
-        };
 
         return (
           <svg width={safeWidth} height={height} role="img" aria-label="Market spread bar chart">
@@ -555,77 +852,54 @@ function MarketSpreadChart({ rows, recommended, elements }) {
 
               <AxisBottom
                 top={innerHeight}
-                scale={x0Scale}
+                scale={xScale}
                 stroke="rgba(27, 48, 38, 0.45)"
                 tickStroke="transparent"
-                tickFormat={() => ""}
+                tickLabelProps={() => ({
+                  fill: "#516255",
+                  fontSize: 11,
+                  textAnchor: "middle",
+                  dy: "0.75em"
+                })}
               />
 
-              {groupData.map((item, index) => {
-                const groupX = x0Scale(item.label) ?? 0;
-                const shortLabel =
-                  item.label.length > 18 ? `${item.label.slice(0, 17)}...` : item.label;
+              {groupData.map((item) => {
+                const barX = xScale(item.label) ?? 0;
+                const barY = yScale(item.value);
+                const barHeight = innerHeight - barY;
 
                 return (
-                  <Group key={item.label} left={groupX}>
-                    {series.map((seriesKey) => {
-                      const value = item[seriesKey];
-
-                      if (value === null || value === undefined) {
-                        return null;
-                      }
-
-                      const barX = x1Scale(seriesKey) ?? 0;
-                      const barY = yScale(value);
-                      const barHeight = innerHeight - barY;
-                      const isCompetitor = seriesKey === "competitor" && index === 0;
-
-                      return (
-                        <g key={`${item.label}-${seriesKey}`}>
-                          <Bar
-                            x={barX}
-                            y={barY}
-                            width={x1Scale.bandwidth()}
-                            height={barHeight}
-                            rx={10}
-                            fill={fills[seriesKey]}
-                            fillOpacity={isCompetitor ? 1 : 0.88}
-                          />
-                          <Text
-                            x={barX + x1Scale.bandwidth() / 2}
-                            y={Math.max(16, barY - 10)}
-                            width={x1Scale.bandwidth() + 12}
-                            textAnchor="middle"
-                            verticalAnchor="middle"
-                            fill="#516255"
-                            fontSize={9}
-                          >
-                            {seriesKey === "competitor" ? formatCurrency(value) : ""}
-                          </Text>
-                        </g>
-                      );
-                    })}
-
+                  <Group key={item.label}>
+                    <title>{item.tooltip}</title>
+                    <Bar
+                      x={barX}
+                      y={barY}
+                      width={xScale.bandwidth()}
+                      height={barHeight}
+                      rx={10}
+                      fill={item.fill}
+                      fillOpacity={0.9}
+                    />
                     <Text
-                      x={x0Scale.bandwidth() / 2}
-                      y={innerHeight + 18}
-                      textAnchor="end"
-                      verticalAnchor="start"
+                      x={barX + xScale.bandwidth() / 2}
+                      y={Math.max(16, barY - 10)}
+                      width={xScale.bandwidth() + 12}
+                      textAnchor="middle"
+                      verticalAnchor="middle"
                       fill="#516255"
                       fontSize={10}
-                      transform={`rotate(-32, ${x0Scale.bandwidth() / 2}, ${innerHeight + 18})`}
                     >
-                      {shortLabel}
+                      {formatCurrency(item.value)}
                     </Text>
                   </Group>
                 );
               })}
 
-              {series.map((seriesKey, index) => (
-                <Group key={seriesKey} left={index * 118} top={-6}>
-                  <rect width={12} height={12} rx={4} fill={fills[seriesKey]} />
+              {groupData.map((item, index) => (
+                <Group key={item.label} left={index * 118} top={-6}>
+                  <rect width={12} height={12} rx={4} fill={item.fill} />
                   <text x={18} y={10} fill="#516255" fontSize={11}>
-                    {labels[seriesKey]}
+                    {item.label}
                   </text>
                 </Group>
               ))}
@@ -751,167 +1025,23 @@ function App() {
 
     const config = vehicleConfigs[vehicle];
     const relevantRows = [];
-    const grouped = new Map();
 
     rows.forEach((row) => {
       if (location && row.location !== location) {
         return;
       }
 
-      if (selectedDate && row.dateKey !== selectedDate) {
-        return;
-      }
-
-      const isElementsRow =
-        row.company === "elementsworld" && config.elementsVehicles.includes(row.vehicle);
-      const isCompetitorRow =
-        row.company !== "elementsworld" && config.competitorVehicles.includes(row.vehicle);
-
-      if (!isElementsRow && !isCompetitorRow) {
-        return;
-      }
-
       relevantRows.push(row);
     });
 
-    selectLatestRowsBySnapshot(relevantRows).forEach((row) => {
-      const isElementsRow =
-        row.company === "elementsworld" && config.elementsVehicles.includes(row.vehicle);
-      const key = row.dateKey;
-      if (!grouped.has(key)) {
-        grouped.set(key, {
-          dateKey: key,
-          elementsRows: [],
-          competitorCandidates: []
-        });
-      }
-
-      const bucket = grouped.get(key);
-      if (!bucket) {
-        return;
-      }
-
-      if (isElementsRow) {
-        bucket.elementsRows.push(row);
-        return;
-      }
-
-      bucket.competitorCandidates.push(row);
-    });
-
-    const sortedDates = Array.from(grouped.keys()).sort();
-
-    const trend = sortedDates.map((dateKey) => {
-      const bucket = grouped.get(dateKey);
-      const elementsRows = bucket?.elementsRows || [];
-      const validDurations = new Set(
-        elementsRows
-          .map((row) => row.tripDays)
-          .filter((tripDays) => tripDays !== null && tripDays !== undefined)
-      );
-      const competitorRows =
-        bucket?.competitorCandidates.filter((row) => validDurations.has(row.tripDays)) || [];
-      const competitorPrices = competitorRows.map((row) => row.price);
-      const elementsPrices = elementsRows.map((row) => row.price);
-      const average = competitorPrices.length ? averageFrom(competitorPrices) : null;
-      const elements = elementsPrices.length ? averageFrom(elementsPrices) : null;
-
-      return {
-        dateKey,
-        average,
-        elements,
-        recommended:
-          average === null ? null : average + (average * adjustment) / 100,
-        competitorCount: competitorRows.length
-      };
-    });
-
-    let latestRows = [];
-    let latestElements = null;
-    let latestAverage = 0;
-    let latestDate = "";
-
-    for (let index = sortedDates.length - 1; index >= 0; index -= 1) {
-      const dateKey = sortedDates[index];
-      const bucket = grouped.get(dateKey);
-      const elementsRows = bucket?.elementsRows || [];
-      const validDurations = new Set(
-        elementsRows
-          .map((row) => row.tripDays)
-          .filter((tripDays) => tripDays !== null && tripDays !== undefined)
-      );
-      const competitorRows =
-        bucket?.competitorCandidates.filter((row) => validDurations.has(row.tripDays)) || [];
-      const competitorPrices = competitorRows.map((row) => row.price);
-      const elementsPrices = elementsRows.map((row) => row.price);
-
-      if (!latestRows.length && competitorRows.length && elementsPrices.length) {
-        latestRows = [...competitorRows].sort((left, right) => left.price - right.price);
-        latestAverage = averageFrom(competitorPrices);
-        latestElements = averageFrom(elementsPrices);
-        latestDate = dateKey;
-      }
-
-      if (latestRows.length && latestElements !== null) {
-        break;
-      }
-    }
-
-    const competitorPrices = latestRows.map((row) => row.price);
-    const lowest = competitorPrices.length ? Math.min(...competitorPrices) : 0;
-    const highest = competitorPrices.length ? Math.max(...competitorPrices) : 0;
-    const recommended = latestAverage
-      ? latestAverage + (latestAverage * adjustment) / 100
-      : 0;
-    const spread = highest - lowest;
-    const upliftValue = recommended - latestAverage;
-    const observedQuotes = trend.reduce(
-      (sum, item) => sum + item.competitorCount,
-      0
+    setDashboard(
+      buildDashboardFromRows({
+        rows: selectLatestRowsBySnapshot(relevantRows),
+        config,
+        adjustment,
+        selectedDate
+      })
     );
-
-    const companyMap = latestRows.reduce((accumulator, row) => {
-      const current = accumulator.get(row.company) || {
-        company: row.company,
-        prices: [],
-        vehicles: new Set()
-      };
-
-      current.prices.push(row.price);
-      current.vehicles.add(row.vehicle);
-      accumulator.set(row.company, current);
-      return accumulator;
-    }, new Map());
-
-    const companyStats = Array.from(companyMap.values())
-      .map((entry) => ({
-        company: entry.company,
-        average: averageFrom(entry.prices),
-        vehicles: Array.from(entry.vehicles).join(", "),
-        count: entry.prices.length
-      }))
-      .sort((left, right) => left.average - right.average);
-
-    setDashboard({
-      summary: {
-        lowest,
-        average: latestAverage,
-        highest,
-        elements: latestElements,
-        recommended,
-        spread,
-        upliftValue,
-        upliftPercent: adjustment,
-        competitorCount: latestRows.length,
-        trackedDates: trend.length,
-        observedQuotes
-      },
-      trend,
-      latestRows,
-      companyStats,
-      latestDate,
-      latestDateLabel: latestDate ? formatDateLabel(latestDate, { year: "numeric" }) : "No snapshot yet"
-    });
   }, [adjustment, location, rows, selectedDate, vehicle]);
 
   const activeConfig = vehicleConfigs[vehicle];
@@ -919,7 +1049,8 @@ function App() {
     dashboard.summary.elements !== null
       ? dashboard.summary.elements - dashboard.summary.average
       : null;
-  const topCompetitor = dashboard.latestRows[0];
+  const cheapestCompetitor = dashboard.summary.cheapestRow;
+  const highestCompetitor = dashboard.summary.highestRow;
   const latestRun = scraperStatus.latestRun;
 
   const toggleScrapeLocation = (nextLocation) => {
@@ -1004,7 +1135,7 @@ function App() {
                 <strong>{activeConfig.label}</strong>
               </div>
               <div>
-                <span className="hero-metadata__label">Latest snapshot</span>
+                <span className="hero-metadata__label">Latest Pickup Date</span>
                 <strong>{dashboard.latestDateLabel}</strong>
               </div>
               <div>
@@ -1269,8 +1400,8 @@ function App() {
             label="Cheapest competitor"
             value={formatCurrency(dashboard.summary.lowest)}
             detail={
-              topCompetitor
-                ? `${topCompetitor.company} â€¢ ${topCompetitor.vehicle}`
+              cheapestCompetitor
+                ? `${cheapestCompetitor.company} • ${cheapestCompetitor.vehicle}`
                 : "No competitor rows for this filter set"
             }
             tone="canyon"
@@ -1278,7 +1409,11 @@ function App() {
           <StatCard
             label="Market spread"
             value={formatCurrency(dashboard.summary.spread)}
-            detail={`${formatCount(dashboard.summary.competitorCount)} quotes in latest snapshot`}
+            detail={
+              highestCompetitor
+                ? `${highestCompetitor.company} • ${highestCompetitor.vehicle}`
+                : `${formatCount(dashboard.summary.competitorCount)} quotes in current view`
+            }
           />
           <StatCard
             label="Tracked pickups"
@@ -1326,7 +1461,8 @@ function App() {
               </div>
               <div className="panel__legend">
                 <span className="legend legend--elements">Elements</span>
-                <span className="legend legend--market">Competitor avg</span>
+                <span className="legend legend--market">Cheapest competitor</span>
+                <span className="legend legend--market">Highest competitor</span>
                 <span className="legend legend--guide">Recommended</span>
               </div>
             </div>
@@ -1367,8 +1503,16 @@ function App() {
               <div>
                 <span>Cheapest signal</span>
                 <strong>
-                  {topCompetitor
-                    ? `${topCompetitor.company} at ${formatCurrency(topCompetitor.price)}`
+                  {cheapestCompetitor
+                    ? `${cheapestCompetitor.company} ${cheapestCompetitor.vehicle} at ${formatCurrency(cheapestCompetitor.price)}`
+                    : "Awaiting competitor data"}
+                </strong>
+              </div>
+              <div>
+                <span>Highest signal</span>
+                <strong>
+                  {highestCompetitor
+                    ? `${highestCompetitor.company} ${highestCompetitor.vehicle} at ${formatCurrency(highestCompetitor.price)}`
                     : "Awaiting competitor data"}
                 </strong>
               </div>
@@ -1393,9 +1537,12 @@ function App() {
                 <div className="chart-empty">Loading competitor mixâ€¦</div>
               ) : (
                 <MarketSpreadChart
-                  rows={dashboard.latestRows}
+                  lowest={dashboard.summary.lowest}
+                  highest={dashboard.summary.highest}
                   recommended={dashboard.summary.recommended}
                   elements={dashboard.summary.elements}
+                  cheapestRow={dashboard.summary.cheapestRow}
+                  highestRow={dashboard.summary.highestRow}
                 />
               )}
             </div>
@@ -1405,7 +1552,7 @@ function App() {
             <div className="panel__header">
               <div>
                 <span className="panel__eyebrow">Operators</span>
-                <h3>Latest competitor summary</h3>
+                <h3>Competitor summary</h3>
               </div>
             </div>
             <div className="company-list">
@@ -1435,7 +1582,7 @@ function App() {
           <div className="panel__header">
             <div>
               <span className="panel__eyebrow">Quote table</span>
-              <h3>Latest competitor rows</h3>
+              <h3>Competitor rows</h3>
             </div>
           </div>
 
@@ -1448,6 +1595,7 @@ function App() {
                   <th>Location</th>
                   <th>Pickup</th>
                   <th>Price</th>
+                  <th>Diff vs Elements</th>
                 </tr>
               </thead>
               <tbody>
@@ -1459,11 +1607,16 @@ function App() {
                       <td>{row.location}</td>
                       <td>{formatDateLabel(row.dateKey, { year: "numeric" })}</td>
                       <td>{formatCurrency(row.price)}</td>
+                      <td>
+                        {dashboard.summary.elements !== null
+                          ? formatDiffVsElements(row.price - dashboard.summary.elements)
+                          : "No data"}
+                      </td>
                     </tr>
                   ))
                 ) : (
                   <tr>
-                    <td colSpan="5" className="table-empty">
+                    <td colSpan="6" className="table-empty">
                       No competitor quotes match the current selection.
                     </td>
                   </tr>
@@ -1478,3 +1631,8 @@ function App() {
 }
 
 export default App;
+
+
+
+
+
