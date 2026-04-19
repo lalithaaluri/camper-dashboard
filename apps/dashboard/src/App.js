@@ -59,15 +59,15 @@ const locationOptions = [
 
 const initialDashboard = {
   summary: {
-    lowest: 0,
-    average: 0,
-    highest: 0,
+    lowest: null,
+    average: null,
+    highest: null,
     cheapestRow: null,
     highestRow: null,
     elements: null,
-    recommended: 0,
-    spread: 0,
-    upliftValue: 0,
+    recommended: null,
+    spread: null,
+    upliftValue: null,
     upliftPercent: 0,
     competitorCount: 0,
     trackedDates: 0,
@@ -434,7 +434,8 @@ export const buildDashboardFromRows = ({
   });
 
   const competitorPrices = latestRows.map((row) => row.price);
-  const latestAverage = competitorPrices.length ? averageFrom(competitorPrices) : 0;
+  const hasCompetitors = competitorPrices.length > 0;
+  const latestAverage = hasCompetitors ? averageFrom(competitorPrices) : null;
   let latestElements = snapshotMetrics?.elementsRows
     ?.filter((row) => isSameVehicle(row.vehicle, selectedVehicle))
     .map((row) => row.price);
@@ -457,13 +458,40 @@ export const buildDashboardFromRows = ({
   const highestRow = latestRows.length
     ? latestRows.reduce((max, row) => (row.price > max.price ? row : max))
     : null;
-  const lowest = cheapestRow ? cheapestRow.price : 0;
-  const highest = highestRow ? highestRow.price : 0;
-  const recommended = competitorPrices.length
-    ? calculateRecommendedPrice(lowest, latestAverage, adjustment)
-    : 0;
-  const spread = highest - lowest;
-  const upliftValue = recommended - latestAverage;
+  const lowest = cheapestRow ? cheapestRow.price : null;
+  const highest = highestRow ? highestRow.price : null;
+  const elementsPrice = latestElements;
+  let recommended = null;
+
+  if (hasCompetitors) {
+    if (
+      elementsPrice !== null &&
+      elementsPrice !== undefined &&
+      !Number.isNaN(elementsPrice) &&
+      elementsPrice < latestAverage
+    ) {
+      recommended = elementsPrice + (elementsPrice * adjustment) / 100;
+    } else {
+      recommended = latestAverage + (latestAverage * adjustment) / 100;
+    }
+  }
+
+  recommended =
+    recommended === null || recommended === undefined || Number.isNaN(recommended)
+      ? null
+      : Math.round(recommended);
+  const spread =
+    lowest !== null && highest !== null && !Number.isNaN(lowest) && !Number.isNaN(highest)
+      ? highest - lowest
+      : null;
+  const upliftValue =
+    recommended === null || recommended === undefined || Number.isNaN(recommended)
+      ? null
+      : elementsPrice !== null && elementsPrice !== undefined && !Number.isNaN(elementsPrice)
+      ? recommended - elementsPrice
+      : latestAverage !== null && latestAverage !== undefined && !Number.isNaN(latestAverage)
+      ? recommended - latestAverage
+      : null;
   const observedQuotes = trend.reduce(
     (sum, item) => sum + item.competitorCount,
     0
@@ -1162,7 +1190,7 @@ function App() {
 
   const activeConfig = vehicleConfigs[vehicle];
   const marketGap =
-    dashboard.summary.elements !== null
+    dashboard.summary.elements !== null && dashboard.summary.average !== null
       ? dashboard.summary.elements - dashboard.summary.average
       : null;
   const cheapestCompetitor = dashboard.summary.cheapestRow;
@@ -1263,10 +1291,15 @@ function App() {
 
           <aside className="hero-highlight">
             <p className="hero-highlight__label">Pricing posture</p>
-            <strong>{formatCurrency(dashboard.summary.recommended)}</strong>
+            <strong>
+              {dashboard.summary.recommended === null
+                ? "N/A"
+                : formatCurrency(dashboard.summary.recommended)}
+            </strong>
             <p className="hero-highlight__detail">
-              Suggested rate based on current competitor average plus a{" "}
-              {dashboard.summary.upliftPercent}% margin buffer.
+              {dashboard.summary.recommended === null
+                ? "Insufficient competitor data"
+                : `Suggested rate based on current competitor average plus a ${dashboard.summary.upliftPercent}% margin buffer.`}
             </p>
             <div className="hero-highlight__meter">
               <span>Market avg</span>
@@ -1498,8 +1531,20 @@ function App() {
         <section className="stats-grid">
           <StatCard
             label="Recommended rate"
-            value={formatCurrency(dashboard.summary.recommended)}
-            detail={`${formatCurrency(dashboard.summary.upliftValue)} above market average`}
+            value={
+              dashboard.summary.recommended === null
+                ? "N/A"
+                : formatCurrency(dashboard.summary.recommended)
+            }
+            detail={
+              dashboard.summary.recommended === null
+                ? "Insufficient competitor data"
+                : marketGap === null
+                ? `${formatCurrency(dashboard.summary.upliftValue)} vs market average`
+                : marketGap < 0
+                ? "Opportunity to increase price"
+                : "Consider reducing price"
+            }
             tone="forest"
           />
           <StatCard
@@ -1641,7 +1686,11 @@ function App() {
               </div>
               <div>
                 <span>Recommendation</span>
-                <strong>{formatCurrency(dashboard.summary.recommended)}</strong>
+                <strong>
+                  {dashboard.summary.recommended === null
+                    ? "N/A"
+                    : formatCurrency(dashboard.summary.recommended)}
+                </strong>
               </div>
             </div>
           </article>
