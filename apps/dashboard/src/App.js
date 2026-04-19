@@ -94,6 +94,50 @@ const initialScraperStatus = {
 
 const normalize = (value) => (value ? value.toLowerCase().trim() : "");
 
+const normalizeVehicleMatch = (value) =>
+  (value || "").toLowerCase().replace(/\s+/g, "");
+
+const trekVehicles = [
+  "trekcampers",
+  "trekbudget",
+  "trekbudgetcamper",
+  "trekmedium",
+  "trekmediumcamper",
+  "treklarge",
+  "treklargecamper"
+];
+
+function normalizeVehicleName(name) {
+  if (!name) return "";
+
+  const value = name.toLowerCase().replace(/\s+/g, "");
+
+  // Trek competitors
+  if (value.includes("station")) return "stationwagen";
+  if (value.includes("sleeper")) return "sleeper";
+  if (value.includes("aventus")) return "aventus2";
+
+  // Elements vehicles
+  if (value.includes("trek")) return "trekcampers";
+  if (value.includes("tandemdeluxe")) return "tandemdeluxe";
+  if (value.includes("tandem")) return "tandem";
+  if (value.includes("quad")) return "quad";
+  if (value.includes("six")) return "sixer";
+
+  // Other competitors
+  if (value.includes("beta")) return "beta2s";
+  if (value.includes("deuce")) return "deuce";
+  if (value.includes("doubledown")) return "doubledown";
+  if (value.includes("highball")) return "highball";
+  if (value.includes("delite")) return "delite";
+  if (value.includes("condo")) return "condo";
+  if (value.includes("rover")) return "rover";
+  if (value.includes("doubleup")) return "doubleup";
+  if (value.includes("bigsix")) return "bigsix";
+
+  return value;
+}
+
 const parseDate = (value) => {
   if (!value) {
     return null;
@@ -160,13 +204,7 @@ export const selectLatestRowsBySnapshot = (rows) => {
 
 const collectBucketMetrics = (bucket) => {
   const elementsRows = bucket?.elementsRows || [];
-  const validDurations = new Set(
-    elementsRows
-      .map((row) => row.tripDays)
-      .filter((tripDays) => tripDays !== null && tripDays !== undefined)
-  );
-  const competitorRows =
-    bucket?.competitorCandidates.filter((row) => validDurations.has(row.tripDays)) || [];
+  const competitorRows = bucket?.competitorCandidates || [];
   const competitorPrices = competitorRows.map((row) => row.price);
   const elementsPrices = elementsRows.map((row) => row.price);
   const cheapestRow = competitorRows.length
@@ -191,17 +229,16 @@ const collectBucketMetrics = (bucket) => {
 };
 
 const calculateRecommendedPrice = (lowest, average, adjustment) => {
-  if (lowest === null || lowest === undefined || Number.isNaN(lowest)) {
+  const basePrice =
+    average !== null && average !== undefined && !Number.isNaN(average)
+      ? average
+      : lowest;
+
+  if (basePrice === null || basePrice === undefined || Number.isNaN(basePrice)) {
     return 0;
   }
 
-  const candidate = lowest * (1 + adjustment / 100);
-
-  if (average === null || average === undefined || Number.isNaN(average)) {
-    return candidate;
-  }
-
-  return Math.min(candidate, average);
+  return basePrice + (basePrice * adjustment) / 100;
 };
 
 const formatCompetitorLabel = (row) =>
@@ -223,14 +260,14 @@ export const formatDiffVsElements = (diff) => {
   return `${formatCurrency(0)} (Same price)`;
 };
 
-const groupRelevantRows = (rows, config) => {
+const groupRelevantRows = (rows, config, selectedVehicle) => {
   const grouped = new Map();
 
   rows.forEach((row) => {
-    const isElementsRow =
-      row.company === "elementsworld" && config.elementsVehicles.includes(row.vehicle);
+    const isElementsRow = row.company === "elementsworld";
     const isCompetitorRow =
-      row.company !== "elementsworld" && config.competitorVehicles.includes(row.vehicle);
+      row.company !== "elementsworld" &&
+      config.competitorVehicles.includes(normalizeVehicleName(row.vehicle));
 
     if (!isElementsRow && !isCompetitorRow) {
       return;
@@ -261,17 +298,79 @@ const groupRelevantRows = (rows, config) => {
   return grouped;
 };
 
+function isSameVehicle(rowVehicle, selectedVehicle) {
+  const normalizedRowVehicle = normalizeVehicleMatch(rowVehicle);
+  const normalizedSelectedVehicle = normalizeVehicleMatch(selectedVehicle);
+
+  if (normalizedSelectedVehicle === "trekcampers") {
+    return trekVehicles.includes(normalizedRowVehicle);
+  }
+
+  return normalizedRowVehicle === normalizedSelectedVehicle;
+}
+
+function findNearestElementsPrice(grouped, targetDate, selectedVehicle) {
+  const dates = Array.from(grouped.keys()).sort();
+
+  if (!dates.length) return null;
+
+  let nearestDate = null;
+  let minDiff = Infinity;
+
+  dates.forEach((dateKey) => {
+    const bucket = grouped.get(dateKey);
+    if (!bucket || !bucket.elementsRows.length) return;
+
+    const diff = Math.abs(new Date(dateKey) - new Date(targetDate));
+
+    if (diff < minDiff) {
+      minDiff = diff;
+      nearestDate = dateKey;
+    }
+  });
+
+  if (!nearestDate) return null;
+
+  const bucket = grouped.get(nearestDate);
+  if (!bucket) return null;
+
+  console.log("Selected:", selectedVehicle);
+  console.log("Elements rows:", bucket.elementsRows);
+  const validRows = bucket.elementsRows.filter((row) =>
+    isSameVehicle(row.vehicle, selectedVehicle)
+  );
+
+  if (!validRows.length) return null;
+
+  const prices = validRows.map((row) => row.price);
+
+  if (!prices.length) {
+    return null;
+  }
+
+  return {
+    value: prices.reduce((a, b) => a + b, 0) / prices.length,
+    date: nearestDate
+  };
+}
+
 export const buildDashboardFromRows = ({
   rows,
   config,
   adjustment,
-  selectedDate = ""
+  selectedDate = "",
+  selectedVehicle = ""
 }) => {
   if (!rows.length) {
     return initialDashboard;
   }
 
-  const grouped = groupRelevantRows(rows, config);
+  const grouped = groupRelevantRows(rows, config, selectedVehicle);
+  grouped.forEach((bucket) => {
+    bucket.elementsRows = bucket.elementsRows.filter((row) =>
+      isSameVehicle(row.vehicle, selectedVehicle)
+    );
+  });
 
   const sortedDates = Array.from(grouped.keys()).sort();
   const trend = sortedDates.map((dateKey) => {
@@ -336,9 +435,22 @@ export const buildDashboardFromRows = ({
 
   const competitorPrices = latestRows.map((row) => row.price);
   const latestAverage = competitorPrices.length ? averageFrom(competitorPrices) : 0;
-  const latestElements = snapshotMetrics?.elementsPrices?.length
-    ? averageFrom(snapshotMetrics.elementsPrices)
+  let latestElements = snapshotMetrics?.elementsRows
+    ?.filter((row) => isSameVehicle(row.vehicle, selectedVehicle))
+    .map((row) => row.price);
+  latestElements = latestElements?.length
+    ? averageFrom(latestElements)
     : null;
+  let fallbackDate = null;
+
+  if (!latestElements && selectedDate) {
+    const fallback = findNearestElementsPrice(grouped, selectedDate, selectedVehicle);
+
+    if (fallback) {
+      latestElements = fallback.value;
+      fallbackDate = fallback.date;
+    }
+  }
   const cheapestRow = latestRows.length
     ? latestRows.reduce((min, row) => (row.price < min.price ? row : min))
     : null;
@@ -351,7 +463,7 @@ export const buildDashboardFromRows = ({
     ? calculateRecommendedPrice(lowest, latestAverage, adjustment)
     : 0;
   const spread = highest - lowest;
-  const upliftValue = recommended - lowest;
+  const upliftValue = recommended - latestAverage;
   const observedQuotes = trend.reduce(
     (sum, item) => sum + item.competitorCount,
     0
@@ -379,6 +491,8 @@ export const buildDashboardFromRows = ({
     }))
     .sort((left, right) => left.average - right.average);
 
+  console.log("Filtered rows count:", rows.length);
+
   return {
     summary: {
       lowest,
@@ -392,6 +506,7 @@ export const buildDashboardFromRows = ({
       upliftValue,
       upliftPercent: adjustment,
       competitorCount: latestRows.length,
+      fallbackDate,
       trackedDates: trend.length,
       observedQuotes
     },
@@ -950,7 +1065,7 @@ function App() {
               dateKey,
               dropoffDate: row.dropoff_date ? String(row.dropoff_date).trim() : "",
               company: normalize(row.company),
-              vehicle: normalize(row.vehicle),
+              vehicle: normalizeVehicleName(row.vehicle),
               location: normalize(row.location),
               type: normalize(row.type),
               price,
@@ -1036,10 +1151,11 @@ function App() {
 
     setDashboard(
       buildDashboardFromRows({
-        rows: selectLatestRowsBySnapshot(relevantRows),
+        rows: relevantRows,
         config,
         adjustment,
-        selectedDate
+        selectedDate,
+        selectedVehicle: vehicle
       })
     );
   }, [adjustment, location, rows, selectedDate, vehicle]);
@@ -1390,28 +1506,35 @@ function App() {
             label="Elements latest"
             value={formatCurrency(dashboard.summary.elements)}
             detail={
-              marketGap === null
-                ? "Waiting for a matched Elements quote"
-                : `${marketGap >= 0 ? "+" : ""}${formatCurrency(marketGap)} vs market`
+              dashboard.summary.elements === null
+                ? "No Elements price available for selected vehicle and date"
+                : dashboard.summary.fallbackDate
+                ? `Using nearest available (${dashboard.summary.fallbackDate})`
+                : "Actual selected date"
             }
             tone="sand"
           />
           <StatCard
-            label="Cheapest competitor"
+            label="Lowest competitor price"
             value={formatCurrency(dashboard.summary.lowest)}
             detail={
               cheapestCompetitor
-                ? `${cheapestCompetitor.company} • ${cheapestCompetitor.vehicle}`
+                ? `${cheapestCompetitor.company} \u2022 ${cheapestCompetitor.vehicle}`
                 : "No competitor rows for this filter set"
             }
             tone="canyon"
           />
           <StatCard
-            label="Market spread"
-            value={formatCurrency(dashboard.summary.spread)}
+            label="Market Average"
+            value={formatCurrency(dashboard.summary.average)}
+            detail="Average competitor price"
+          />
+          <StatCard
+            label="Highest competitor price"
+            value={formatCurrency(dashboard.summary.highest)}
             detail={
               highestCompetitor
-                ? `${highestCompetitor.company} • ${highestCompetitor.vehicle}`
+                ? `${highestCompetitor.company} \u2022 ${highestCompetitor.vehicle}`
                 : `${formatCount(dashboard.summary.competitorCount)} quotes in current view`
             }
           />
@@ -1468,7 +1591,7 @@ function App() {
             </div>
             <div className="chart-frame">
               {loading ? (
-                <div className="chart-empty">Loading market historyâ€¦</div>
+                <div className="chart-empty">{"Loading market history\u2026"}</div>
               ) : (
                 <PriceTrendChart data={dashboard.trend} />
               )}
@@ -1534,7 +1657,7 @@ function App() {
             </div>
             <div className="chart-frame">
               {loading ? (
-                <div className="chart-empty">Loading competitor mixâ€¦</div>
+                <div className="chart-empty">{"Loading competitor mix\u2026"}</div>
               ) : (
                 <MarketSpreadChart
                   lowest={dashboard.summary.lowest}
