@@ -66,9 +66,11 @@ const initialDashboard = {
     highestRow: null,
     elements: null,
     recommended: null,
+    recommendedDailyRate: null,
     spread: null,
     upliftValue: null,
     upliftPercent: 0,
+    recommendationSource: null,
     competitorCount: 0,
     trackedDates: 0,
     observedQuotes: 0
@@ -92,7 +94,8 @@ const initialScraperStatus = {
   error: ""
 };
 
-const normalize = (value) => (value ? value.toLowerCase().trim() : "");
+const normalize = (value) =>
+  String(value || "").toLowerCase().replace(/\s+/g, "");
 
 const normalizeVehicleMatch = (value) =>
   (value || "").toLowerCase().replace(/\s+/g, "");
@@ -160,6 +163,20 @@ const parseDate = (value) => {
   return null;
 };
 
+const toDateKey = (value) => {
+  const date = value instanceof Date ? value : parseDate(value);
+  if (!date) {
+    return "";
+  }
+
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+
+const formatDate = (date) => toDateKey(date);
+
 const formatCurrency = (value) => {
   if (value === null || value === undefined || Number.isNaN(value)) {
     return "No data";
@@ -201,6 +218,235 @@ export const selectLatestRowsBySnapshot = (rows) => {
   return Array.from(latestByKey.values());
 };
 
+const buildDuplicateQuoteKey = (row) =>
+  [
+    row.company,
+    normalizeVehicleName(row.vehicle),
+    row.dateKey,
+    row.dropoffDateKey,
+    row.price
+  ].join("|");
+
+const dedupeQuoteRows = (rows) => {
+  const seen = new Set();
+
+  return rows.filter((row) => {
+    const key = buildDuplicateQuoteKey(row);
+
+    if (seen.has(key)) {
+      return false;
+    }
+
+    seen.add(key);
+    return true;
+  });
+};
+
+const getRowDurationDays = (row) => {
+  if (!row.dateKey || !row.dropoffDateKey) {
+    return null;
+  }
+
+  return calculateTripDays(parseDate(row.dateKey), parseDate(row.dropoffDateKey));
+};
+
+const getBaselinePrice = (cheapestCompetitorPrice, elementsPrice) => {
+  const hasCheapestCompetitor =
+    cheapestCompetitorPrice !== null &&
+    cheapestCompetitorPrice !== undefined &&
+    !Number.isNaN(cheapestCompetitorPrice);
+  const hasElementsPrice =
+    elementsPrice !== null &&
+    elementsPrice !== undefined &&
+    !Number.isNaN(elementsPrice);
+
+  if (hasCheapestCompetitor && !hasElementsPrice) {
+    return {
+      baselinePrice: cheapestCompetitorPrice,
+      source: "competitor"
+    };
+  }
+
+  if (hasCheapestCompetitor && hasElementsPrice) {
+    if (elementsPrice < cheapestCompetitorPrice) {
+      return {
+        baselinePrice: elementsPrice,
+        source: "elements"
+      };
+    }
+
+    return {
+      baselinePrice: cheapestCompetitorPrice,
+      source: "competitor"
+    };
+  }
+
+  if (hasElementsPrice) {
+    return {
+      baselinePrice: elementsPrice,
+      source: "elements"
+    };
+  }
+
+  return {
+    baselinePrice: null,
+    source: null
+  };
+};
+
+export const getMappedCompetitors = (selectedVehicle = "") =>
+  vehicleConfigs[selectedVehicle]?.competitorVehicles || [];
+
+export const buildCompetitorQuoteSnapshot = ({
+  rows,
+  selectedPickup = "",
+  selectedDropoff = "",
+  selectedVehicle = "",
+  selectedLocation = ""
+}) => {
+  const competitors = getMappedCompetitors(selectedVehicle);
+  const filteredRows = rows.filter((row) => {
+    if (row.company === "elementsworld") {
+      return false;
+    }
+
+    const normalizedVehicle = normalizeVehicleName(row.vehicle);
+    if (competitors.length && !competitors.includes(normalizedVehicle)) {
+      return false;
+    }
+
+    if (selectedPickup && row.dateKey !== selectedPickup) {
+      return false;
+    }
+
+    if (selectedDropoff && row.dropoffDateKey !== selectedDropoff) {
+      return false;
+    }
+
+    if (selectedLocation && row.location !== normalize(selectedLocation)) {
+      return false;
+    }
+
+    return true;
+  });
+  const latestScrapeDate = filteredRows.reduce((latest, row) => {
+    if (!(row.scrapeDate instanceof Date) || Number.isNaN(row.scrapeDate.getTime())) {
+      return latest;
+    }
+
+    if (!latest || compareScrapeDates(row.scrapeDate, latest) > 0) {
+      return row.scrapeDate;
+    }
+
+    return latest;
+  }, null);
+  const latestRows = latestScrapeDate
+    ? filteredRows.filter(
+        (row) =>
+          row.scrapeDate instanceof Date &&
+          !Number.isNaN(row.scrapeDate.getTime()) &&
+          compareScrapeDates(row.scrapeDate, latestScrapeDate) === 0
+      )
+    : filteredRows;
+  const quoteRows = dedupeQuoteRows(latestRows)
+    .map((row) => {
+      const durationDays = getRowDurationDays(row);
+      const dailyRate =
+        durationDays && Number.isFinite(durationDays) && durationDays > 0
+          ? Math.round(row.price / durationDays)
+          : null;
+
+      return {
+        ...row,
+        normalizedVehicle: normalizeVehicleName(row.vehicle),
+        durationDays,
+        dailyRate
+      };
+    })
+    .sort((left, right) => Number(left.price) - Number(right.price));
+  const competitorPrices = quoteRows.map((row) => Number(row.price));
+  const average =
+    competitorPrices.length > 0 ? averageFrom(competitorPrices) : null;
+  const cheapestRow = quoteRows.length ? quoteRows[0] : null;
+  const highestRow = quoteRows.length ? quoteRows[quoteRows.length - 1] : null;
+  const companyMap = quoteRows.reduce((accumulator, row) => {
+    const current = accumulator.get(row.company) || {
+      company: row.company,
+      prices: [],
+      vehicles: new Set()
+    };
+
+    current.prices.push(row.price);
+    current.vehicles.add(row.vehicle);
+    accumulator.set(row.company, current);
+    return accumulator;
+  }, new Map());
+  const companyStats = Array.from(companyMap.values())
+    .map((entry) => ({
+      company: entry.company,
+      average: averageFrom(entry.prices),
+      vehicles: Array.from(entry.vehicles).join(", "),
+      count: entry.prices.length
+    }))
+    .sort((left, right) => left.average - right.average);
+
+  return {
+    rows: quoteRows,
+    companyStats,
+    latestScrapeDate,
+    summary: {
+      lowest: cheapestRow ? cheapestRow.price : null,
+      average,
+      highest: highestRow ? highestRow.price : null,
+      cheapestRow,
+      highestRow,
+      competitorCount: quoteRows.length
+    }
+  };
+};
+
+export const buildQuoteTableRows = ({
+  elementsRow = null,
+  competitorRows = []
+}) => {
+  const finalRows = [];
+
+  if (elementsRow) {
+    const durationDays = getRowDurationDays(elementsRow);
+    finalRows.push({
+      ...elementsRow,
+      isElements: true,
+      normalizedVehicle: normalizeVehicleName(elementsRow.vehicle),
+      durationDays,
+      dailyRate:
+        durationDays &&
+        Number.isFinite(durationDays) &&
+        durationDays > 0
+          ? Math.round(elementsRow.price / durationDays)
+          : null
+    });
+  }
+
+  finalRows.push(
+    ...competitorRows.map((row) => ({
+      ...row,
+      isElements: Boolean(row.isElements)
+    }))
+  );
+
+  return finalRows.sort((left, right) => {
+    if (left.isElements) {
+      return -1;
+    }
+
+    if (right.isElements) {
+      return 1;
+    }
+
+    return Number(left.price) - Number(right.price);
+  });
+};
+
 
 const collectBucketMetrics = (bucket) => {
   const elementsRows = bucket?.elementsRows || [];
@@ -228,17 +474,33 @@ const collectBucketMetrics = (bucket) => {
   };
 };
 
-const calculateRecommendedPrice = (lowest, average, adjustment) => {
-  const basePrice =
-    average !== null && average !== undefined && !Number.isNaN(average)
-      ? average
-      : lowest;
-
-  if (basePrice === null || basePrice === undefined || Number.isNaN(basePrice)) {
-    return 0;
+export const calculateRecommendedPrice = (baselinePrice, durationDays, adjustmentPercent) => {
+  if (
+    baselinePrice === null ||
+    baselinePrice === undefined ||
+    Number.isNaN(baselinePrice)
+  ) {
+    return {
+      baselinePrice: null,
+      recommendedDailyRate: null,
+      recommendedTotalPrice: null
+    };
   }
 
-  return basePrice + (basePrice * adjustment) / 100;
+  const recommendedTotalPrice = baselinePrice * (1 + adjustmentPercent / 100);
+  const recommendedDailyRate =
+    durationDays !== null &&
+    durationDays !== undefined &&
+    Number.isFinite(durationDays) &&
+    durationDays > 0
+      ? recommendedTotalPrice / durationDays
+      : null;
+
+  return {
+    baselinePrice,
+    recommendedDailyRate,
+    recommendedTotalPrice
+  };
 };
 
 const formatCompetitorLabel = (row) =>
@@ -334,11 +596,9 @@ function findNearestElementsPrice(grouped, targetDate, selectedVehicle) {
   const bucket = grouped.get(nearestDate);
   if (!bucket) return null;
 
-  console.log("Selected:", selectedVehicle);
-  console.log("Elements rows:", bucket.elementsRows);
-  const validRows = bucket.elementsRows.filter((row) =>
-    isSameVehicle(row.vehicle, selectedVehicle)
-  );
+  const validRows = selectedVehicle
+    ? bucket.elementsRows.filter((row) => isSameVehicle(row.vehicle, selectedVehicle))
+    : bucket.elementsRows;
 
   if (!validRows.length) return null;
 
@@ -354,6 +614,115 @@ function findNearestElementsPrice(grouped, targetDate, selectedVehicle) {
   };
 }
 
+export const filterExactTripRows = ({
+  rows,
+  selectedPickup = "",
+  selectedDropoff = "",
+  selectedVehicle = "",
+  selectedLocation = ""
+}) =>
+  rows.filter(
+    (row) =>
+      (!selectedPickup || row.dateKey === selectedPickup) &&
+      (!selectedDropoff || row.dropoffDateKey === selectedDropoff) &&
+      (!selectedVehicle || row.vehicle === selectedVehicle) &&
+      (!selectedLocation || row.location === selectedLocation) &&
+      row.company === "elementsworld"
+  );
+
+export const selectExactTripRow = (filters) =>
+  filterExactTripRows(filters).reduce((latest, row) => {
+    if (!latest) {
+      return row;
+    }
+
+    return compareScrapeDates(row.scrapeDate, latest.scrapeDate) >= 0 ? row : latest;
+  }, null);
+
+export const buildExactTripMetrics = ({
+  rows,
+  selectedPickup = "",
+  selectedDropoff = "",
+  selectedVehicle = "",
+  selectedLocation = ""
+}) => {
+  const selectedRow = selectExactTripRow({
+    rows,
+    selectedPickup,
+    selectedDropoff,
+    selectedVehicle,
+    selectedLocation
+  });
+  const duration =
+    selectedPickup && selectedDropoff
+      ? (new Date(selectedDropoff) - new Date(selectedPickup)) / (1000 * 60 * 60 * 24)
+      : null;
+  const totalPrice = selectedRow ? selectedRow.price : null;
+  const dailyRate =
+    totalPrice !== null &&
+    duration !== null &&
+    Number.isFinite(duration) &&
+    duration > 0
+      ? Math.round(totalPrice / duration)
+      : null;
+
+  return {
+    selectedRow,
+    duration,
+    totalPrice,
+    dailyRate,
+    hasExactMatch: Boolean(selectedRow)
+  };
+};
+
+export const selectDefaultElementsRow = (rows) => {
+  const nonTrekElementsRows = rows.filter(
+    (row) =>
+      normalize(row.company) === "elementsworld" &&
+      normalize(row.vehicle) !== "trekcampers"
+  );
+
+  if (!nonTrekElementsRows.length) {
+    return null;
+  }
+
+  const scoredRows = nonTrekElementsRows.map((row) => {
+    const mappedCompetitors = getMappedCompetitors(row.vehicle);
+    const matchingCompetitors = rows.filter(
+      (entry) =>
+        normalize(entry.company) !== "elementsworld" &&
+        mappedCompetitors.includes(normalize(entry.vehicle)) &&
+        formatDate(entry.dateKey) === formatDate(row.dateKey) &&
+        formatDate(entry.dropoffDateKey) === formatDate(row.dropoffDateKey)
+    );
+
+    return {
+      row,
+      coverage: matchingCompetitors.length
+    };
+  });
+
+  scoredRows.sort((left, right) => {
+    if (right.coverage !== left.coverage) {
+      return right.coverage - left.coverage;
+    }
+
+    const pickupDiff =
+      new Date(formatDate(left.row.dateKey)) - new Date(formatDate(right.row.dateKey));
+
+    if (pickupDiff !== 0) {
+      return pickupDiff;
+    }
+
+    return (
+      new Date(formatDate(left.row.dropoffDateKey)) -
+      new Date(formatDate(right.row.dropoffDateKey))
+    );
+  });
+
+  return scoredRows.length ? scoredRows[0].row : null;
+};
+
 export const buildDashboardFromRows = ({
   rows,
   config,
@@ -367,9 +736,9 @@ export const buildDashboardFromRows = ({
 
   const grouped = groupRelevantRows(rows, config, selectedVehicle);
   grouped.forEach((bucket) => {
-    bucket.elementsRows = bucket.elementsRows.filter((row) =>
-      isSameVehicle(row.vehicle, selectedVehicle)
-    );
+    bucket.elementsRows = selectedVehicle
+      ? bucket.elementsRows.filter((row) => isSameVehicle(row.vehicle, selectedVehicle))
+      : bucket.elementsRows;
   });
 
   const sortedDates = Array.from(grouped.keys()).sort();
@@ -377,20 +746,28 @@ export const buildDashboardFromRows = ({
     const bucketMetrics = collectBucketMetrics(grouped.get(dateKey));
 
     return {
+      cheapestDurationDays: bucketMetrics.cheapestRow
+        ? getRowDurationDays(bucketMetrics.cheapestRow)
+        : null,
       dateKey,
       lowest: bucketMetrics.lowest,
       highest: bucketMetrics.highest,
       cheapestRow: bucketMetrics.cheapestRow,
       highestRow: bucketMetrics.highestRow,
       elements: bucketMetrics.elements,
-      recommended:
-        bucketMetrics.lowest === null
+      recommended: (() => {
+        const recommendedPricing = calculateRecommendedPrice(
+          bucketMetrics.lowest ?? bucketMetrics.elements,
+          bucketMetrics.cheapestRow ? getRowDurationDays(bucketMetrics.cheapestRow) : null,
+          adjustment
+        );
+
+        return recommendedPricing.recommendedTotalPrice === null ||
+          recommendedPricing.recommendedTotalPrice === undefined ||
+          Number.isNaN(recommendedPricing.recommendedTotalPrice)
           ? null
-          : calculateRecommendedPrice(
-              bucketMetrics.lowest,
-              bucketMetrics.average,
-              adjustment
-            ),
+          : Math.round(recommendedPricing.recommendedTotalPrice);
+      })(),
       competitorCount: bucketMetrics.competitorRows.length
     };
   });
@@ -417,6 +794,10 @@ export const buildDashboardFromRows = ({
       return bucketMetrics.competitorRows;
     });
     snapshotMetrics = {
+      elementsRows: sortedDates.flatMap((dateKey) => {
+        const bucketMetrics = collectBucketMetrics(grouped.get(dateKey));
+        return bucketMetrics.elementsRows;
+      }),
       elementsPrices: sortedDates.flatMap((dateKey) => {
         const bucketMetrics = collectBucketMetrics(grouped.get(dateKey));
         return bucketMetrics.elementsPrices;
@@ -437,7 +818,7 @@ export const buildDashboardFromRows = ({
   const hasCompetitors = competitorPrices.length > 0;
   const latestAverage = hasCompetitors ? averageFrom(competitorPrices) : null;
   let latestElements = snapshotMetrics?.elementsRows
-    ?.filter((row) => isSameVehicle(row.vehicle, selectedVehicle))
+    ?.filter((row) => (selectedVehicle ? isSameVehicle(row.vehicle, selectedVehicle) : true))
     .map((row) => row.price);
   latestElements = latestElements?.length
     ? averageFrom(latestElements)
@@ -461,25 +842,18 @@ export const buildDashboardFromRows = ({
   const lowest = cheapestRow ? cheapestRow.price : null;
   const highest = highestRow ? highestRow.price : null;
   const elementsPrice = latestElements;
-  let recommended = null;
-
-  if (hasCompetitors) {
-    if (
-      elementsPrice !== null &&
-      elementsPrice !== undefined &&
-      !Number.isNaN(elementsPrice) &&
-      elementsPrice < latestAverage
-    ) {
-      recommended = elementsPrice + (elementsPrice * adjustment) / 100;
-    } else {
-      recommended = latestAverage + (latestAverage * adjustment) / 100;
-    }
-  }
-
-  recommended =
-    recommended === null || recommended === undefined || Number.isNaN(recommended)
+  const recommendationBaseline = getBaselinePrice(lowest, elementsPrice);
+  const recommendedPricing = calculateRecommendedPrice(
+    recommendationBaseline.baselinePrice,
+    cheapestRow ? getRowDurationDays(cheapestRow) : null,
+    adjustment
+  );
+  const recommended =
+    recommendedPricing.recommendedTotalPrice === null ||
+    recommendedPricing.recommendedTotalPrice === undefined ||
+    Number.isNaN(recommendedPricing.recommendedTotalPrice)
       ? null
-      : Math.round(recommended);
+      : Math.round(recommendedPricing.recommendedTotalPrice);
   const spread =
     lowest !== null && highest !== null && !Number.isNaN(lowest) && !Number.isNaN(highest)
       ? highest - lowest
@@ -489,8 +863,8 @@ export const buildDashboardFromRows = ({
       ? null
       : elementsPrice !== null && elementsPrice !== undefined && !Number.isNaN(elementsPrice)
       ? recommended - elementsPrice
-      : latestAverage !== null && latestAverage !== undefined && !Number.isNaN(latestAverage)
-      ? recommended - latestAverage
+      : lowest !== null && lowest !== undefined && !Number.isNaN(lowest)
+      ? recommended - lowest
       : null;
   const observedQuotes = trend.reduce(
     (sum, item) => sum + item.competitorCount,
@@ -518,9 +892,6 @@ export const buildDashboardFromRows = ({
       count: entry.prices.length
     }))
     .sort((left, right) => left.average - right.average);
-
-  console.log("Filtered rows count:", rows.length);
-
   return {
     summary: {
       lowest,
@@ -533,6 +904,8 @@ export const buildDashboardFromRows = ({
       spread,
       upliftValue,
       upliftPercent: adjustment,
+      recommendedDailyRate: recommendedPricing.recommendedDailyRate,
+      recommendationSource: recommendationBaseline.source,
       competitorCount: latestRows.length,
       fallbackDate,
       trackedDates: trend.length,
@@ -1056,10 +1429,11 @@ function MarketSpreadChart({
 
 function App() {
   const [rows, setRows] = useState([]);
-  const [vehicle, setVehicle] = useState("trekcampers");
+  const [vehicle, setVehicle] = useState("");
   const [adjustment, setAdjustment] = useState(5);
   const [location, setLocation] = useState("");
   const [selectedDate, setSelectedDate] = useState("");
+  const [selectedDropoff, setSelectedDropoff] = useState("");
   const [loading, setLoading] = useState(true);
   const [dashboard, setDashboard] = useState(initialDashboard);
   const [datasetVersion, setDatasetVersion] = useState(0);
@@ -1074,6 +1448,13 @@ function App() {
   const [scrapeHeadless, setScrapeHeadless] = useState(true);
   const [scrapeSubmitting, setScrapeSubmitting] = useState(false);
   const [scraperStatus, setScraperStatus] = useState(initialScraperStatus);
+  const pickupDate = selectedDate;
+  const dropoffDate = selectedDropoff;
+
+  useEffect(() => {
+    console.log("DEFAULT PICKUP:", pickupDate);
+    console.log("DEFAULT DROPOFF:", dropoffDate);
+  }, []);
 
   useEffect(() => {
     setLoading(true);
@@ -1086,12 +1467,13 @@ function App() {
           .map((row) => {
             const dateObject = parseDate(row.pickup_date_parsed || row.pickup_date);
             const dropoffObject = parseDate(row.dropoff_date);
-            const dateKey = dateObject ? dateObject.toISOString().split("T")[0] : "";
+            const dateKey = toDateKey(dateObject);
             const price = Number(row.price);
 
             return {
               dateKey,
               dropoffDate: row.dropoff_date ? String(row.dropoff_date).trim() : "",
+              dropoffDateKey: toDateKey(dropoffObject),
               company: normalize(row.company),
               vehicle: normalizeVehicleName(row.vehicle),
               location: normalize(row.location),
@@ -1104,6 +1486,7 @@ function App() {
           .filter(
             (row) =>
               row.dateKey &&
+              row.dropoffDateKey &&
               row.company &&
               row.vehicle &&
               row.location &&
@@ -1167,6 +1550,10 @@ function App() {
     }
 
     const config = vehicleConfigs[vehicle];
+    if (!config) {
+      setDashboard(initialDashboard);
+      return;
+    }
     const relevantRows = [];
 
     rows.forEach((row) => {
@@ -1188,13 +1575,134 @@ function App() {
     );
   }, [adjustment, location, rows, selectedDate, vehicle]);
 
-  const activeConfig = vehicleConfigs[vehicle];
+  const dropoffOptions = Array.from(
+    new Set(
+      rows
+        .filter(
+          (row) =>
+            row.dateKey === pickupDate &&
+            row.company === "elementsworld" &&
+            row.vehicle === vehicle
+        )
+        .map((row) => row.dropoffDateKey)
+        .filter(Boolean)
+    )
+  ).sort();
+
+  useEffect(() => {
+    if (selectedDropoff && !dropoffOptions.includes(selectedDropoff)) {
+      setSelectedDropoff("");
+    }
+  }, [selectedDropoff, dropoffOptions]);
+
+  useEffect(() => {
+    if (!rows.length || pickupDate || dropoffDate) {
+      return;
+    }
+
+    if (vehicle) {
+      return;
+    }
+
+    const bestRow = selectDefaultElementsRow(rows);
+
+    if (!bestRow) {
+      console.warn("No valid non-Trek Elements rows found for default");
+      return;
+    }
+
+    setVehicle(bestRow.vehicle);
+    setSelectedDate(bestRow.dateKey);
+    setSelectedDropoff(bestRow.dropoffDateKey);
+
+    console.log("DEFAULT VALID ELEMENTS ROW:", bestRow);
+  }, [rows, pickupDate, dropoffDate, vehicle]);
+
+  useEffect(() => {
+    if (!pickupDate) {
+      return;
+    }
+
+    const matchingRows = rows.filter(
+      (row) =>
+        row.dateKey === pickupDate &&
+        row.company === "elementsworld" &&
+        row.vehicle === vehicle
+    );
+
+    if (
+      selectedDropoff &&
+      matchingRows.some((row) => row.dropoffDateKey === selectedDropoff)
+    ) {
+      return;
+    }
+
+    if (matchingRows.length > 0) {
+      setSelectedDropoff(matchingRows[0].dropoffDateKey);
+    }
+  }, [pickupDate, selectedDropoff, vehicle, rows]);
+
+  const exactTripMetrics = buildExactTripMetrics({
+    rows,
+    selectedPickup: selectedDate,
+    selectedDropoff,
+    selectedVehicle: vehicle,
+    selectedLocation: location
+  });
+  const competitorQuoteSnapshot = buildCompetitorQuoteSnapshot({
+    rows,
+    selectedPickup: selectedDate,
+    selectedDropoff,
+    selectedVehicle: vehicle,
+    selectedLocation: location
+  });
+  const elementsRow = exactTripMetrics.selectedRow;
+  const quoteTableRows = buildQuoteTableRows({
+    elementsRow,
+    competitorRows: competitorQuoteSnapshot.rows
+  });
+  const showNoTripData = Boolean(
+    selectedDate && selectedDropoff && !exactTripMetrics.hasExactMatch
+  );
+
+  console.log("ELEMENTS ROW USED:", elementsRow);
+
+  useEffect(() => {
+    console.log("COMPETITOR ROWS:", competitorQuoteSnapshot.rows);
+  }, [competitorQuoteSnapshot.rows]);
+
+  const activeConfig = vehicleConfigs[vehicle] || vehicleConfigs.trekcampers;
+  const elementsPrice = exactTripMetrics.totalPrice;
+  const competitorPrices = competitorQuoteSnapshot.rows
+    .map((row) => Number(row.price))
+    .filter((price) => !Number.isNaN(price));
+  const cheapestCompetitorPrice =
+    competitorPrices.length > 0 ? Math.min(...competitorPrices) : null;
+  const currentBaseline = getBaselinePrice(cheapestCompetitorPrice, elementsPrice);
+  const currentRecommendation = calculateRecommendedPrice(
+    currentBaseline.baselinePrice,
+    exactTripMetrics.duration,
+    adjustment
+  );
+  const recommendedPrice =
+    currentRecommendation.recommendedTotalPrice === null ||
+    currentRecommendation.recommendedTotalPrice === undefined ||
+    Number.isNaN(currentRecommendation.recommendedTotalPrice)
+      ? null
+      : Math.round(currentRecommendation.recommendedTotalPrice);
+  const recommendationDetail =
+    currentBaseline.source === "competitor"
+      ? "Suggested rate based on cheapest competitor plus selected margin adjustment"
+      : currentBaseline.source === "elements"
+      ? "Suggested rate based on Elements price plus selected margin adjustment"
+      : "Insufficient competitor and Elements data";
+  const recommendationSource = currentBaseline.source;
   const marketGap =
-    dashboard.summary.elements !== null && dashboard.summary.average !== null
-      ? dashboard.summary.elements - dashboard.summary.average
+    elementsPrice !== null && competitorQuoteSnapshot.summary.average !== null
+      ? elementsPrice - competitorQuoteSnapshot.summary.average
       : null;
-  const cheapestCompetitor = dashboard.summary.cheapestRow;
-  const highestCompetitor = dashboard.summary.highestRow;
+  const cheapestCompetitor = competitorQuoteSnapshot.summary.cheapestRow;
+  const highestCompetitor = competitorQuoteSnapshot.summary.highestRow;
   const latestRun = scraperStatus.latestRun;
 
   const toggleScrapeLocation = (nextLocation) => {
@@ -1279,10 +1787,6 @@ function App() {
                 <strong>{activeConfig.label}</strong>
               </div>
               <div>
-                <span className="hero-metadata__label">Latest Pickup Date</span>
-                <strong>{dashboard.latestDateLabel}</strong>
-              </div>
-              <div>
                 <span className="hero-metadata__label">Market focus</span>
                 <strong>{location || "All depots"}</strong>
               </div>
@@ -1292,14 +1796,10 @@ function App() {
           <aside className="hero-highlight">
             <p className="hero-highlight__label">Pricing posture</p>
             <strong>
-              {dashboard.summary.recommended === null
-                ? "N/A"
-                : formatCurrency(dashboard.summary.recommended)}
+              {recommendedPrice === null ? "N/A" : formatCurrency(recommendedPrice)}
             </strong>
             <p className="hero-highlight__detail">
-              {dashboard.summary.recommended === null
-                ? "Insufficient competitor data"
-                : `Suggested rate based on current competitor average plus a ${dashboard.summary.upliftPercent}% margin buffer.`}
+              {recommendationDetail}
             </p>
             <div className="hero-highlight__meter">
               <span>Market avg</span>
@@ -1309,8 +1809,8 @@ function App() {
                   style={{
                     width: `${Math.min(
                       100,
-                      dashboard.summary.average
-                        ? (dashboard.summary.recommended / dashboard.summary.average) * 65
+                      competitorQuoteSnapshot.summary.average
+                        ? (recommendedPrice / competitorQuoteSnapshot.summary.average) * 65
                         : 0
                     )}%`
                   }}
@@ -1356,6 +1856,21 @@ function App() {
                 value={selectedDate}
                 onChange={(event) => setSelectedDate(event.target.value)}
               />
+            </label>
+
+            <label className="field">
+              <span>Dropoff date</span>
+              <select
+                value={selectedDropoff}
+                onChange={(event) => setSelectedDropoff(event.target.value)}
+              >
+                <option value="">Select dropoff date</option>
+                {dropoffOptions.map((date) => (
+                  <option key={date} value={date}>
+                    {date}
+                  </option>
+                ))}
+              </select>
             </label>
 
             <label className="field">
@@ -1528,40 +2043,66 @@ function App() {
           </div>
         </section>
 
+        <div
+          style={{
+            background: "#eee",
+            padding: "10px",
+            marginTop: "10px"
+          }}
+        >
+          <p>Default Pickup: {selectedDate || "Not selected"}</p>
+          <p>Default Dropoff: {selectedDropoff || "Not selected"}</p>
+        </div>
+
+        {showNoTripData ? (
+          <section className="panel">
+            <p>No data available for selected trip</p>
+          </section>
+        ) : null}
+
         <section className="stats-grid">
           <StatCard
-            label="Recommended rate"
-            value={
-              dashboard.summary.recommended === null
-                ? "N/A"
-                : formatCurrency(dashboard.summary.recommended)
-            }
+            label="Elements Price"
+            value={formatCurrency(exactTripMetrics.totalPrice)}
             detail={
-              dashboard.summary.recommended === null
-                ? "Insufficient competitor data"
-                : marketGap === null
-                ? `${formatCurrency(dashboard.summary.upliftValue)} vs market average`
-                : marketGap < 0
-                ? "Opportunity to increase price"
-                : "Consider reducing price"
+              exactTripMetrics.hasExactMatch
+                ? "Your current selling price"
+                : "Select pickup and dropoff to see your current selling price"
             }
             tone="forest"
           />
           <StatCard
-            label="Elements latest"
-            value={formatCurrency(dashboard.summary.elements)}
-            detail={
-              dashboard.summary.elements === null
-                ? "No Elements price available for selected vehicle and date"
-                : dashboard.summary.fallbackDate
-                ? `Using nearest available (${dashboard.summary.fallbackDate})`
-                : "Actual selected date"
+            label="Duration"
+            value={
+              exactTripMetrics.duration !== null &&
+              Number.isFinite(exactTripMetrics.duration) &&
+              exactTripMetrics.duration > 0
+                ? `${exactTripMetrics.duration} days`
+                : "No data"
             }
+            detail="Calculated from pickup and dropoff dates"
             tone="sand"
           />
           <StatCard
+            label="Daily rate"
+            value={
+              exactTripMetrics.dailyRate === null || exactTripMetrics.dailyRate === undefined
+                ? "No data"
+                : `${formatCurrency(exactTripMetrics.dailyRate)}/day`
+            }
+            detail="Total trip price divided by duration"
+            tone="canyon"
+          />
+          <StatCard
+            label="Recommended rate"
+            value={
+              recommendedPrice === null ? "N/A" : formatCurrency(recommendedPrice)
+            }
+            detail={recommendationDetail}
+          />
+          <StatCard
             label="Lowest competitor price"
-            value={formatCurrency(dashboard.summary.lowest)}
+            value={formatCurrency(competitorQuoteSnapshot.summary.lowest)}
             detail={
               cheapestCompetitor
                 ? `${cheapestCompetitor.company} \u2022 ${cheapestCompetitor.vehicle}`
@@ -1571,16 +2112,18 @@ function App() {
           />
           <StatCard
             label="Market Average"
-            value={formatCurrency(dashboard.summary.average)}
-            detail="Average competitor price"
+            value={formatCurrency(competitorQuoteSnapshot.summary.average)}
+            detail="Average competitor price for the current quote set"
           />
           <StatCard
             label="Highest competitor price"
-            value={formatCurrency(dashboard.summary.highest)}
+            value={formatCurrency(competitorQuoteSnapshot.summary.highest)}
             detail={
               highestCompetitor
                 ? `${highestCompetitor.company} \u2022 ${highestCompetitor.vehicle}`
-                : `${formatCount(dashboard.summary.competitorCount)} quotes in current view`
+                : `${formatCount(
+                    competitorQuoteSnapshot.summary.competitorCount
+                  )} quotes in current view`
             }
           />
           <StatCard
@@ -1602,10 +2145,14 @@ function App() {
 
           <article className="insight-card">
             <span className="insight-card__label">Rate signal</span>
-            <h2>{formatCurrency(dashboard.summary.average)} market centre</h2>
+            <h2>{formatCurrency(dashboard.summary.lowest)} cheapest competitor</h2>
             <p>
-              Current guidance lands at {formatCurrency(dashboard.summary.recommended)},
-              giving commercial room while staying anchored to observed competitor pricing.
+              Current guidance lands at {formatCurrency(recommendedPrice)},{" "}
+              {recommendationSource === "competitor"
+                ? "anchored to the cheapest observed competitor for this selection."
+                : recommendationSource === "elements"
+                ? "using the Elements price fallback for this selection."
+                : "awaiting a usable baseline for this selection."}
             </p>
           </article>
 
@@ -1687,9 +2234,7 @@ function App() {
               <div>
                 <span>Recommendation</span>
                 <strong>
-                  {dashboard.summary.recommended === null
-                    ? "N/A"
-                    : formatCurrency(dashboard.summary.recommended)}
+                  {recommendedPrice === null ? "N/A" : formatCurrency(recommendedPrice)}
                 </strong>
               </div>
             </div>
@@ -1709,12 +2254,12 @@ function App() {
                 <div className="chart-empty">{"Loading competitor mix\u2026"}</div>
               ) : (
                 <MarketSpreadChart
-                  lowest={dashboard.summary.lowest}
-                  highest={dashboard.summary.highest}
-                  recommended={dashboard.summary.recommended}
-                  elements={dashboard.summary.elements}
-                  cheapestRow={dashboard.summary.cheapestRow}
-                  highestRow={dashboard.summary.highestRow}
+                  lowest={competitorQuoteSnapshot.summary.lowest}
+                  highest={competitorQuoteSnapshot.summary.highest}
+                  recommended={recommendedPrice}
+                  elements={elementsPrice}
+                  cheapestRow={competitorQuoteSnapshot.summary.cheapestRow}
+                  highestRow={competitorQuoteSnapshot.summary.highestRow}
                 />
               )}
             </div>
@@ -1728,8 +2273,8 @@ function App() {
               </div>
             </div>
             <div className="company-list">
-              {dashboard.companyStats.length ? (
-                dashboard.companyStats.map((company) => (
+              {competitorQuoteSnapshot.companyStats.length ? (
+                competitorQuoteSnapshot.companyStats.map((company) => (
                   <div key={company.company} className="company-list__item">
                     <div>
                       <strong>{company.company}</strong>
@@ -1764,31 +2309,47 @@ function App() {
                 <tr>
                   <th>Company</th>
                   <th>Vehicle</th>
-                  <th>Location</th>
                   <th>Pickup</th>
+                  <th>Dropoff</th>
+                  <th>Duration</th>
                   <th>Price</th>
-                  <th>Diff vs Elements</th>
+                  <th>Daily Rate</th>
                 </tr>
               </thead>
               <tbody>
-                {dashboard.latestRows.length ? (
-                  dashboard.latestRows.map((row, index) => (
-                    <tr key={`${row.company}-${row.vehicle}-${index}`}>
-                      <td>{row.company}</td>
+                {quoteTableRows.length ? (
+                  quoteTableRows.map((row) => (
+                    <tr
+                      key={`${row.company}-${row.normalizedVehicle}-${row.dateKey}-${row.dropoffDateKey}-${row.price}`}
+                      style={
+                        row.isElements
+                          ? {
+                              fontWeight: 700,
+                              backgroundColor: "#f4efe2"
+                            }
+                          : undefined
+                      }
+                    >
+                      <td>{row.isElements ? "Elements World" : row.company}</td>
                       <td>{row.vehicle}</td>
-                      <td>{row.location}</td>
                       <td>{formatDateLabel(row.dateKey, { year: "numeric" })}</td>
+                      <td>{formatDateLabel(row.dropoffDateKey, { year: "numeric" })}</td>
+                      <td>
+                        {row.durationDays !== null && row.durationDays !== undefined
+                          ? `${row.durationDays}`
+                          : "No data"}
+                      </td>
                       <td>{formatCurrency(row.price)}</td>
                       <td>
-                        {dashboard.summary.elements !== null
-                          ? formatDiffVsElements(row.price - dashboard.summary.elements)
+                        {row.dailyRate !== null && row.dailyRate !== undefined
+                          ? formatCurrency(row.dailyRate)
                           : "No data"}
                       </td>
                     </tr>
                   ))
                 ) : (
                   <tr>
-                    <td colSpan="6" className="table-empty">
+                    <td colSpan="7" className="table-empty">
                       No competitor quotes match the current selection.
                     </td>
                   </tr>

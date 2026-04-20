@@ -1,7 +1,14 @@
 import { render, screen } from "@testing-library/react";
 import App, {
+  buildCompetitorQuoteSnapshot,
+  buildExactTripMetrics,
   buildDashboardFromRows,
+  buildQuoteTableRows,
+  calculateRecommendedPrice,
   formatDiffVsElements,
+  getMappedCompetitors,
+  selectDefaultElementsRow,
+  selectExactTripRow,
   selectLatestRowsBySnapshot
 } from "./App";
 
@@ -98,6 +105,342 @@ test("renders camper revenue dashboard", async () => {
     await screen.findByText(/modern pricing visibility for every road-trip class/i)
   ).toBeInTheDocument();
   expect(screen.getByText(/recommended rate/i)).toBeInTheDocument();
+  expect(screen.queryByText(/latest pickup date/i)).not.toBeInTheDocument();
+});
+
+test("selectDefaultElementsRow prefers the non-Trek Elements row with the strongest competitor coverage", () => {
+  const rows = [
+    {
+      dateKey: "2026-04-01",
+      dropoffDateKey: "2026-04-04",
+      company: "elementsworld",
+      vehicle: "trekcampers",
+      price: 320
+    },
+    {
+      dateKey: "2026-04-02",
+      dropoffDateKey: "2026-04-06",
+      company: "elementsworld",
+      vehicle: "quad",
+      price: 520
+    },
+    {
+      dateKey: "2026-04-02",
+      dropoffDateKey: "2026-04-06",
+      company: "mighty",
+      vehicle: "delite",
+      price: 540
+    },
+    {
+      dateKey: "2026-04-02",
+      dropoffDateKey: "2026-04-06",
+      company: "jucy",
+      vehicle: "condo",
+      price: 560
+    },
+    {
+      dateKey: "2026-04-02",
+      dropoffDateKey: "2026-04-06",
+      company: "luckyrentals",
+      vehicle: "rover",
+      price: 580
+    },
+    {
+      dateKey: "2026-04-01",
+      dropoffDateKey: "2026-04-05",
+      company: "elementsworld",
+      vehicle: "tandem",
+      price: 410
+    },
+    {
+      dateKey: "2026-04-01",
+      dropoffDateKey: "2026-04-05",
+      company: "spaceships",
+      vehicle: "beta2s",
+      price: 350
+    }
+  ];
+
+  expect(selectDefaultElementsRow(rows)).toMatchObject({
+    vehicle: "quad",
+    dateKey: "2026-04-02",
+    dropoffDateKey: "2026-04-06"
+  });
+});
+
+test("selectExactTripRow chooses the latest exact pickup and dropoff match", () => {
+  const rows = [
+    {
+      dateKey: "2026-04-29",
+      dropoffDateKey: "2026-05-05",
+      location: "auckland",
+      company: "elementsworld",
+      vehicle: "trekcampers",
+      price: 900,
+      scrapeDate: new Date("2026-04-18")
+    },
+    {
+      dateKey: "2026-04-29",
+      dropoffDateKey: "2026-05-05",
+      location: "auckland",
+      company: "elementsworld",
+      vehicle: "trekcampers",
+      price: 930,
+      scrapeDate: new Date("2026-04-19")
+    },
+    {
+      dateKey: "2026-04-29",
+      dropoffDateKey: "2026-05-05",
+      location: "auckland",
+      company: "campervanvillage",
+      vehicle: "trekcampers",
+      price: 880,
+      scrapeDate: new Date("2026-04-19")
+    }
+  ];
+
+  expect(
+    selectExactTripRow({
+      rows,
+      selectedPickup: "2026-04-29",
+      selectedDropoff: "2026-05-05",
+      selectedVehicle: "trekcampers",
+      selectedLocation: "auckland"
+    })
+  ).toMatchObject({
+    company: "elementsworld",
+    price: 930
+  });
+});
+
+test("buildExactTripMetrics returns total price, duration, and daily rate only for an exact match", () => {
+  const rows = [
+    {
+      dateKey: "2026-04-29",
+      dropoffDateKey: "2026-05-05",
+      location: "auckland",
+      company: "elementsworld",
+      vehicle: "trekcampers",
+      price: 930,
+      scrapeDate: new Date("2026-04-19")
+    }
+  ];
+
+  expect(
+    buildExactTripMetrics({
+      rows,
+      selectedPickup: "2026-04-29",
+      selectedDropoff: "2026-05-05",
+      selectedVehicle: "trekcampers",
+      selectedLocation: "auckland"
+    })
+  ).toMatchObject({
+    totalPrice: 930,
+    duration: 6,
+    dailyRate: 155,
+    hasExactMatch: true
+  });
+
+  expect(
+    buildExactTripMetrics({
+      rows,
+      selectedPickup: "2026-04-29",
+      selectedDropoff: "2026-05-04",
+      selectedVehicle: "trekcampers",
+      selectedLocation: "auckland"
+    })
+  ).toMatchObject({
+    totalPrice: null,
+    dailyRate: null,
+    hasExactMatch: false
+  });
+});
+
+test("getMappedCompetitors returns the normalized competitor list for the selected vehicle", () => {
+  expect(getMappedCompetitors("trekcampers")).toEqual([
+    "stationwagen",
+    "sleeper",
+    "aventus2"
+  ]);
+});
+
+test("buildCompetitorQuoteSnapshot keeps only exact-match competitor rows from the latest scrape and removes duplicates", () => {
+  const rows = [
+    {
+      dateKey: "2026-05-27",
+      dropoffDateKey: "2026-05-31",
+      location: "auckland",
+      company: "campervanvillage",
+      vehicle: "Aventus 2",
+      type: "competitor",
+      price: 240,
+      tripDays: 4,
+      scrapeDate: new Date("2026-05-20")
+    },
+    {
+      dateKey: "2026-05-27",
+      dropoffDateKey: "2026-05-31",
+      location: "auckland",
+      company: "campervanvillage",
+      vehicle: "aventus2",
+      type: "competitor",
+      price: 256,
+      tripDays: 4,
+      scrapeDate: new Date("2026-05-21")
+    },
+    {
+      dateKey: "2026-05-27",
+      dropoffDateKey: "2026-05-31",
+      location: "auckland",
+      company: "campervanvillage",
+      vehicle: "aventus2",
+      type: "competitor",
+      price: 256,
+      tripDays: 4,
+      scrapeDate: new Date("2026-05-21")
+    },
+    {
+      dateKey: "2026-05-27",
+      dropoffDateKey: "2026-05-31",
+      location: "auckland",
+      company: "happycampers",
+      vehicle: "Sleeper",
+      type: "competitor",
+      price: 300,
+      tripDays: 4,
+      scrapeDate: new Date("2026-05-21")
+    },
+    {
+      dateKey: "2026-05-27",
+      dropoffDateKey: "2026-06-01",
+      location: "auckland",
+      company: "happycampers",
+      vehicle: "Sleeper",
+      type: "competitor",
+      price: 320,
+      tripDays: 5,
+      scrapeDate: new Date("2026-05-21")
+    },
+    {
+      dateKey: "2026-05-27",
+      dropoffDateKey: "2026-05-31",
+      location: "christchurch",
+      company: "happycampers",
+      vehicle: "Sleeper",
+      type: "competitor",
+      price: 280,
+      tripDays: 4,
+      scrapeDate: new Date("2026-05-21")
+    },
+    {
+      dateKey: "2026-05-27",
+      dropoffDateKey: "2026-05-31",
+      location: "auckland",
+      company: "elementsworld",
+      vehicle: "trekcampers",
+      type: "elements",
+      price: 500,
+      tripDays: 4,
+      scrapeDate: new Date("2026-05-21")
+    }
+  ];
+
+  const snapshot = buildCompetitorQuoteSnapshot({
+    rows,
+    selectedPickup: "2026-05-27",
+    selectedDropoff: "2026-05-31",
+    selectedVehicle: "trekcampers",
+    selectedLocation: "auckland"
+  });
+
+  expect(snapshot.rows).toHaveLength(2);
+  expect(snapshot.rows.map((row) => row.price)).toEqual([256, 300]);
+  expect(snapshot.rows[0]).toMatchObject({
+    company: "campervanvillage",
+    vehicle: "aventus2",
+    durationDays: 4,
+    dailyRate: 64
+  });
+  expect(snapshot.summary).toMatchObject({
+    lowest: 256,
+    highest: 300,
+    average: 278,
+    competitorCount: 2
+  });
+});
+
+test("buildQuoteTableRows places Elements first and keeps competitors sorted by price", () => {
+  const rows = buildQuoteTableRows({
+    elementsRow: {
+      company: "elementsworld",
+      vehicle: "trekcampers",
+      dateKey: "2026-06-04",
+      dropoffDateKey: "2026-06-18",
+      price: 551,
+      tripDays: 14
+    },
+    competitorRows: [
+      {
+        company: "happycampers",
+        vehicle: "sleeper",
+        normalizedVehicle: "sleeper",
+        dateKey: "2026-06-04",
+        dropoffDateKey: "2026-06-18",
+        price: 949,
+        durationDays: 14,
+        dailyRate: 68,
+        isElements: false
+      },
+      {
+        company: "campervanvillage",
+        vehicle: "aventus2",
+        normalizedVehicle: "aventus2",
+        dateKey: "2026-06-04",
+        dropoffDateKey: "2026-06-18",
+        price: 447,
+        durationDays: 14,
+        dailyRate: 32,
+        isElements: false
+      },
+      {
+        company: "roadrunner",
+        vehicle: "stationwagen",
+        normalizedVehicle: "stationwagen",
+        dateKey: "2026-06-04",
+        dropoffDateKey: "2026-06-18",
+        price: 546,
+        durationDays: 14,
+        dailyRate: 39,
+        isElements: false
+      }
+    ]
+  });
+
+  expect(rows.map((row) => [row.isElements, row.price])).toEqual([
+    [true, 551],
+    [false, 447],
+    [false, 546],
+    [false, 949]
+  ]);
+  expect(rows[0]).toMatchObject({
+    company: "elementsworld",
+    durationDays: 14,
+    dailyRate: 39
+  });
+  expect(rows[1].durationDays).toBe(14);
+});
+
+test("calculateRecommendedPrice returns a total even when duration is unavailable", () => {
+  const recommended = calculateRecommendedPrice(447, 14, 5);
+
+  expect(recommended.baselinePrice).toBe(447);
+  expect(recommended.recommendedDailyRate).toBeCloseTo(33.525, 3);
+  expect(recommended.recommendedTotalPrice).toBeCloseTo(469.35, 2);
+  expect(calculateRecommendedPrice(447, 0, 5)).toMatchObject({
+    baselinePrice: 447,
+    recommendedDailyRate: null,
+    recommendedTotalPrice: 469.35
+  });
 });
 
 test("selectLatestRowsBySnapshot keeps the most recent scrape for each market slot", () => {
@@ -212,7 +555,7 @@ test("buildDashboardFromRows uses the latest pickup date by default and filters 
   ]);
   expect(defaultDashboard.summary.average).toBe(300);
   expect(defaultDashboard.summary.elements).toBe(330);
-  expect(defaultDashboard.summary.recommended).toBe(300);
+  expect(defaultDashboard.summary.recommended).toBe(315);
   expect(defaultDashboard.summary.cheapestRow).toMatchObject({
     company: "campervanvillage",
     vehicle: "aventus2",
@@ -249,7 +592,7 @@ test("buildDashboardFromRows uses the latest pickup date by default and filters 
       scrapeDate: new Date("2026-04-18")
     },
     elements: 330,
-    recommended: 300
+    recommended: 315
   });
   expect(defaultDashboard.latestDateLabel).toMatch(/2 Apr 2026/i);
   expect(filteredDashboard.latestRows.map((row) => row.dateKey)).toEqual([
@@ -309,7 +652,7 @@ test("buildDashboardFromRows falls back to available rows when latest date has n
     "2026-04-01"
   ]);
   expect(dashboard.summary.average).toBe(295);
-  expect(dashboard.summary.recommended).toBe(295);
+  expect(dashboard.summary.recommended).toBe(310);
 });
 
 test("buildDashboardFromRows bases recommendation on cheapest competitor and margin", () => {
@@ -363,6 +706,79 @@ test("buildDashboardFromRows bases recommendation on cheapest competitor and mar
   expect(dashboard.summary.average).toBe(240);
   expect(dashboard.summary.recommended).toBe(209);
   expect(dashboard.summary.recommended).toBeLessThan(dashboard.summary.average);
+});
+
+test("buildDashboardFromRows uses Elements as the baseline when Elements is already cheaper", () => {
+  const config = {
+    competitorVehicles: ["aventus2", "sleeper"],
+    elementsVehicles: ["tandem"]
+  };
+  const rows = [
+    {
+      dateKey: "2026-04-02",
+      dropoffDate: "2026-04-05",
+      location: "auckland",
+      company: "elementsworld",
+      vehicle: "tandem",
+      type: "elements",
+      price: 180,
+      tripDays: 3,
+      scrapeDate: new Date("2026-04-18")
+    },
+    {
+      dateKey: "2026-04-02",
+      dropoffDate: "2026-04-05",
+      location: "auckland",
+      company: "campervanvillage",
+      vehicle: "aventus2",
+      type: "competitor",
+      price: 220,
+      tripDays: 3,
+      scrapeDate: new Date("2026-04-18")
+    }
+  ];
+
+  const dashboard = buildDashboardFromRows({
+    rows,
+    config,
+    adjustment: 10
+  });
+
+  expect(dashboard.summary.lowest).toBe(220);
+  expect(dashboard.summary.elements).toBe(180);
+  expect(dashboard.summary.recommended).toBe(198);
+  expect(dashboard.summary.recommendationSource).toBe("elements");
+});
+
+test("buildDashboardFromRows falls back to Elements pricing when competitor data is unavailable", () => {
+  const config = {
+    competitorVehicles: ["beta2s"],
+    elementsVehicles: ["tandem"]
+  };
+  const rows = [
+    {
+      dateKey: "2026-04-02",
+      dropoffDate: "2026-04-05",
+      location: "auckland",
+      company: "elementsworld",
+      vehicle: "tandem",
+      type: "elements",
+      price: 300,
+      tripDays: 3,
+      scrapeDate: new Date("2026-04-18")
+    }
+  ];
+
+  const dashboard = buildDashboardFromRows({
+    rows,
+    config,
+    adjustment: 10
+  });
+
+  expect(dashboard.summary.lowest).toBeNull();
+  expect(dashboard.summary.elements).toBe(300);
+  expect(dashboard.summary.recommended).toBe(330);
+  expect(dashboard.summary.recommendationSource).toBe("elements");
 });
 
 test("formatDiffVsElements returns business-friendly labels", () => {
