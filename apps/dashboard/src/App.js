@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Papa from "papaparse";
 import { AxisBottom, AxisLeft } from "@visx/axis";
 import { curveMonotoneX } from "@visx/curve";
@@ -14,12 +14,26 @@ const SCRAPER_API_BASE =
   process.env.REACT_APP_SCRAPER_API_URL || "http://localhost:4301";
 
 const vehicleConfigs = {
-  trekcampers: {
-    label: "Trek Campers",
-    shortLabel: "Trek",
-    competitorVehicles: ["stationwagen", "sleeper", "aventus2"],
-    elementsVehicles: ["trekcampers"],
+  "trek budget": {
+    label: "Trek Budget Camper",
+    shortLabel: "Budget",
+    competitorVehicles: [ "travellersautobarnstationwagon" ],
+    elementsVehicles: ["trek budget"],
     narrative: "Entry-level two-berth trips and budget-led weekend demand."
+  },
+  "trek medium": {
+    label: "Trek Medium Camper",
+    shortLabel: "Medium",
+    competitorVehicles: [ "happycamperssleeper" ],
+    elementsVehicles: ["trek medium"],
+    narrative: "Flexible mid-tier touring with balanced comfort and value."
+  },
+  "trek large": {
+    label: "Trek Large Camper",
+    shortLabel: "Large",
+    competitorVehicles: [ "campervanvillageaventus2" ],
+    elementsVehicles: ["trek large"],
+    narrative: "Higher-capacity configuration for longer family routes."
   },
   tandem: {
     label: "Tandem",
@@ -94,51 +108,75 @@ const initialScraperStatus = {
   error: ""
 };
 
+const competitorMap = {
+  "trek budget": ["stationwagen"],
+  "trek budget camper": ["stationwagen"],
+  "trek medium": ["sleeper"],
+  "trek medium camper": ["sleeper"],
+  "trek large": ["aventus2"],
+  "trek large camper": ["aventus2"]
+};
+
 const normalize = (value) =>
   String(value || "").toLowerCase().replace(/\s+/g, "");
 
-const normalizeVehicleMatch = (value) =>
-  (value || "").toLowerCase().replace(/\s+/g, "");
+function normalizeVehicle(v) {
+  if (!v) return "";
+  v = String(v).toLowerCase();
 
-const trekVehicles = [
-  "trekcampers",
-  "trekbudget",
-  "trekbudgetcamper",
-  "trekmedium",
-  "trekmediumcamper",
-  "treklarge",
-  "treklargecamper"
-];
+  if (v.includes("budget")) return "trek budget";
+  if (v.includes("medium")) return "trek medium";
+  if (v.includes("large")) return "trek large";
 
-function normalizeVehicleName(name) {
-  if (!name) return "";
+  const compact = v.replace(/\s+/g, "");
+  if (compact.includes("tandemdeluxe")) return "tandemdeluxe";
+  if (compact.includes("tandem")) return "tandem";
+  if (compact.includes("quad")) return "quad";
+  if (compact.includes("six")) return "sixer";
 
-  const value = name.toLowerCase().replace(/\s+/g, "");
+  if (compact.includes("stationwagen") || compact.includes("stationwagon")) return "stationwagen";
+  if (compact.includes("sleeper")) return "sleeper";
+  if (compact.includes("aventus")) return "aventus2";
 
-  // Trek competitors
-  if (value.includes("station")) return "stationwagen";
-  if (value.includes("sleeper")) return "sleeper";
-  if (value.includes("aventus")) return "aventus2";
+  if (compact.includes("beta")) return "beta2s";
+  if (compact.includes("deuce")) return "deuce";
+  if (compact.includes("doubledown")) return "doubledown";
+  if (compact.includes("highball")) return "highball";
+  if (compact.includes("delite")) return "delite";
+  if (compact.includes("condo")) return "condo";
+  if (compact.includes("rover")) return "rover";
+  if (compact.includes("doubleup")) return "doubleup";
+  if (compact.includes("bigsix")) return "bigsix";
 
-  // Elements vehicles
-  if (value.includes("trek")) return "trekcampers";
-  if (value.includes("tandemdeluxe")) return "tandemdeluxe";
-  if (value.includes("tandem")) return "tandem";
-  if (value.includes("quad")) return "quad";
-  if (value.includes("six")) return "sixer";
+  return v.trim().replace(/\s+/g, " ");
+}
 
-  // Other competitors
-  if (value.includes("beta")) return "beta2s";
-  if (value.includes("deuce")) return "deuce";
-  if (value.includes("doubledown")) return "doubledown";
-  if (value.includes("highball")) return "highball";
-  if (value.includes("delite")) return "delite";
-  if (value.includes("condo")) return "condo";
-  if (value.includes("rover")) return "rover";
-  if (value.includes("doubleup")) return "doubleup";
-  if (value.includes("bigsix")) return "bigsix";
+const normalizeVehicleMatch = (value) => normalizeVehicle(value);
+const normalizeVehicleName = (name) => normalizeVehicle(name);
 
-  return value;
+function formatDateDMY(dateStr) {
+  if (!dateStr) return "";
+
+  if (dateStr.includes("-")) {
+    const [year, month, day] = dateStr.split("-");
+    return `${day}/${month}/${year}`;
+  }
+
+  if (dateStr.includes("/")) {
+    const [month, day, year] = dateStr.split("/");
+    return `${day}/${month}/${year}`;
+  }
+
+  return dateStr;
+}
+
+function formatDisplayDate(dateStr) {
+  if (!dateStr) return "";
+  const d = new Date(dateStr);
+  const day = String(d.getDate()).padStart(2, "0");
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const year = d.getFullYear();
+  return `${day}/${month}/${year}`;
 }
 
 const parseDate = (value) => {
@@ -267,14 +305,7 @@ const getBaselinePrice = (cheapestCompetitorPrice, elementsPrice) => {
     };
   }
 
-  if (hasCheapestCompetitor && hasElementsPrice) {
-    if (elementsPrice < cheapestCompetitorPrice) {
-      return {
-        baselinePrice: elementsPrice,
-        source: "elements"
-      };
-    }
-
+  if (hasCheapestCompetitor) {
     return {
       baselinePrice: cheapestCompetitorPrice,
       source: "competitor"
@@ -295,7 +326,9 @@ const getBaselinePrice = (cheapestCompetitorPrice, elementsPrice) => {
 };
 
 export const getMappedCompetitors = (selectedVehicle = "") =>
-  vehicleConfigs[selectedVehicle]?.competitorVehicles || [];
+  competitorMap[normalizeVehicle(selectedVehicle)]
+    ? competitorMap[normalizeVehicle(selectedVehicle)].map((entry) => normalize(entry))
+    : vehicleConfigs[normalizeVehicle(selectedVehicle)]?.competitorVehicles || [];
 
 export const buildCompetitorQuoteSnapshot = ({
   rows,
@@ -306,12 +339,33 @@ export const buildCompetitorQuoteSnapshot = ({
 }) => {
   const competitors = getMappedCompetitors(selectedVehicle);
   const filteredRows = rows.filter((row) => {
-    if (row.company === "elementsworld") {
+    if (normalize(row.company) === "elementsworld") {
       return false;
     }
 
-    const normalizedVehicle = normalizeVehicleName(row.vehicle);
-    if (competitors.length && !competitors.includes(normalizedVehicle)) {
+    const normalizedVehicle = normalizeVehicle(row.vehicle);
+    const normalizedSelectedVehicle = normalizeVehicle(selectedVehicle);
+    const competitorLookup = normalize(`${row.company} ${normalizedVehicle}`);
+    const competitorVehicleOnlyLookup = normalize(normalizedVehicle);
+    const isMappedCompetitor = competitors.some(
+      (competitorToken) =>
+        competitorLookup.includes(competitorToken) ||
+        competitorVehicleOnlyLookup.includes(competitorToken)
+    );
+    const matchesSelectedVehicle =
+      !normalizedSelectedVehicle ||
+      normalize(normalizedVehicle) === normalize(normalizedSelectedVehicle) ||
+      isMappedCompetitor;
+
+    if (!matchesSelectedVehicle) {
+      return false;
+    }
+
+    if (
+      competitors.length &&
+      normalize(normalizedVehicle) !== normalize(normalizedSelectedVehicle) &&
+      !isMappedCompetitor
+    ) {
       return false;
     }
 
@@ -526,10 +580,21 @@ const groupRelevantRows = (rows, config, selectedVehicle) => {
   const grouped = new Map();
 
   rows.forEach((row) => {
-    const isElementsRow = row.company === "elementsworld";
+    const normalizedSelectedVehicle = normalizeVehicle(selectedVehicle);
+    const normalizedRowVehicle = normalizeVehicle(row.vehicle);
+    const competitorLookup = normalize(`${row.company} ${normalizedRowVehicle}`);
+    const competitorVehicleOnlyLookup = normalize(normalizedRowVehicle);
+    const isElementsRow =
+      normalize(row.company) === "elementsworld" &&
+      (!normalizedSelectedVehicle ||
+        normalize(normalizedRowVehicle) === normalize(normalizedSelectedVehicle));
     const isCompetitorRow =
-      row.company !== "elementsworld" &&
-      config.competitorVehicles.includes(normalizeVehicleName(row.vehicle));
+      normalize(row.company) !== "elementsworld" &&
+      config.competitorVehicles.some(
+        (competitorToken) =>
+          competitorLookup.includes(competitorToken) ||
+          competitorVehicleOnlyLookup.includes(competitorToken)
+      );
 
     if (!isElementsRow && !isCompetitorRow) {
       return;
@@ -563,12 +628,7 @@ const groupRelevantRows = (rows, config, selectedVehicle) => {
 function isSameVehicle(rowVehicle, selectedVehicle) {
   const normalizedRowVehicle = normalizeVehicleMatch(rowVehicle);
   const normalizedSelectedVehicle = normalizeVehicleMatch(selectedVehicle);
-
-  if (normalizedSelectedVehicle === "trekcampers") {
-    return trekVehicles.includes(normalizedRowVehicle);
-  }
-
-  return normalizedRowVehicle === normalizedSelectedVehicle;
+  return normalize(normalizedRowVehicle) === normalize(normalizedSelectedVehicle);
 }
 
 function findNearestElementsPrice(grouped, targetDate, selectedVehicle) {
@@ -625,7 +685,8 @@ export const filterExactTripRows = ({
     (row) =>
       (!selectedPickup || row.dateKey === selectedPickup) &&
       (!selectedDropoff || row.dropoffDateKey === selectedDropoff) &&
-      (!selectedVehicle || row.vehicle === selectedVehicle) &&
+      (!selectedVehicle ||
+        normalizeVehicle(row.vehicle) === normalizeVehicle(selectedVehicle)) &&
       (!selectedLocation || row.location === selectedLocation) &&
       row.company === "elementsworld"
   );
@@ -676,29 +737,57 @@ export const buildExactTripMetrics = ({
 };
 
 export const selectDefaultElementsRow = (rows) => {
-  const nonTrekElementsRows = rows.filter(
+  const elementsRows = rows.filter(
     (row) =>
       normalize(row.company) === "elementsworld" &&
-      normalize(row.vehicle) !== "trekcampers"
+      Boolean(vehicleConfigs[normalizeVehicle(row.vehicle)])
   );
 
-  if (!nonTrekElementsRows.length) {
+  if (!elementsRows.length) {
     return null;
   }
 
-  const scoredRows = nonTrekElementsRows.map((row) => {
-    const mappedCompetitors = getMappedCompetitors(row.vehicle);
-    const matchingCompetitors = rows.filter(
-      (entry) =>
-        normalize(entry.company) !== "elementsworld" &&
-        mappedCompetitors.includes(normalize(entry.vehicle)) &&
-        formatDate(entry.dateKey) === formatDate(row.dateKey) &&
-        formatDate(entry.dropoffDateKey) === formatDate(row.dropoffDateKey)
+  const companyVehicleCoverageByKey = new Map();
+  const vehicleCoverageByKey = new Map();
+  rows.forEach((entry) => {
+    if (normalize(entry.company) === "elementsworld") {
+      return;
+    }
+
+    const normalizedVehicle = normalizeVehicle(entry.vehicle);
+    const companyVehicleKey = `${entry.dateKey}|${entry.dropoffDateKey}|${normalize(
+      `${entry.company} ${normalizedVehicle}`
+    )}`;
+    const vehicleOnlyKey = `${entry.dateKey}|${entry.dropoffDateKey}|${normalize(
+      normalizedVehicle
+    )}`;
+
+    companyVehicleCoverageByKey.set(
+      companyVehicleKey,
+      (companyVehicleCoverageByKey.get(companyVehicleKey) || 0) + 1
     );
+    vehicleCoverageByKey.set(
+      vehicleOnlyKey,
+      (vehicleCoverageByKey.get(vehicleOnlyKey) || 0) + 1
+    );
+  });
+
+  const scoredRows = elementsRows.map((row) => {
+    const normalizedVehicle = normalizeVehicle(row.vehicle);
+    const mappedCompetitors = getMappedCompetitors(normalizedVehicle);
+    const coverage = mappedCompetitors.reduce((count, competitorVehicle) => {
+      const companyVehicleKey = `${row.dateKey}|${row.dropoffDateKey}|${competitorVehicle}`;
+      const vehicleOnlyKey = `${row.dateKey}|${row.dropoffDateKey}|${competitorVehicle}`;
+      return (
+        count +
+        (companyVehicleCoverageByKey.get(companyVehicleKey) || 0) +
+        (vehicleCoverageByKey.get(vehicleOnlyKey) || 0)
+      );
+    }, 0);
 
     return {
       row,
-      coverage: matchingCompetitors.length
+      coverage
     };
   });
 
@@ -929,6 +1018,12 @@ const formatCount = (value) =>
 const formatDateLabel = (value, options = {}) => {
   if (!value) {
     return "No date";
+  }
+
+  const hasCustomOptions = Object.keys(options).length > 0;
+  if (!hasCustomOptions || (Object.keys(options).length === 1 && options.year === "numeric")) {
+    const normalizedDate = toDateKey(value);
+    return normalizedDate ? formatDateDMY(normalizedDate) : value;
   }
 
   const date = new Date(value);
@@ -1435,8 +1530,8 @@ function App() {
   const [selectedDate, setSelectedDate] = useState("");
   const [selectedDropoff, setSelectedDropoff] = useState("");
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   const [dashboard, setDashboard] = useState(initialDashboard);
-  const [datasetVersion, setDatasetVersion] = useState(0);
   const [scrapePickupDate, setScrapePickupDate] = useState(() =>
     new Date().toISOString().slice(0, 10)
   );
@@ -1448,60 +1543,195 @@ function App() {
   const [scrapeHeadless, setScrapeHeadless] = useState(true);
   const [scrapeSubmitting, setScrapeSubmitting] = useState(false);
   const [scraperStatus, setScraperStatus] = useState(initialScraperStatus);
+  const pickupDateInputRef = useRef(null);
+  const dropoffDateInputRef = useRef(null);
   const pickupDate = selectedDate;
   const dropoffDate = selectedDropoff;
+  const handlePickupDateChange = (event) => {
+    setSelectedDate(event.target.value);
+  };
+  const handleDropoffDateChange = (event) => {
+    setSelectedDropoff(event.target.value);
+  };
+  const openNativeDatePicker = (inputRef) => {
+    const input = inputRef.current;
+    if (!input) {
+      return;
+    }
+
+    try {
+      input.focus({ preventScroll: true });
+      if (typeof input.showPicker === "function") {
+        input.showPicker();
+        return;
+      }
+    } catch {
+      // no-op: fall back to click below
+    }
+
+    try {
+      input.click();
+    } catch {
+      // no-op
+    }
+  };
 
   useEffect(() => {
-    console.log("DEFAULT PICKUP:", pickupDate);
-    console.log("DEFAULT DROPOFF:", dropoffDate);
+    let cancelled = false;
+    const controller = new AbortController();
+    let defaultSelectionTimer = null;
+    let fetchResolved = false;
+    let settled = false;
+    const timeoutId = window.setTimeout(() => {
+      if (!cancelled && !settled) {
+        settled = true;
+        controller.abort();
+        setLoadError("CSV fetch timed out");
+        setLoading(false);
+      }
+    }, 30000);
+
+    const finishLoading = () => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      window.clearTimeout(timeoutId);
+      setLoading(false);
+    };
+
+    setLoading(true);
+    setLoadError("");
+
+    fetch("/dataset_FINAL_TrekSAFE.csv", { signal: controller.signal })
+      .then((res) => {
+        if (!res.ok) {
+          throw new Error(`CSV fetch failed: ${res.status}`);
+        }
+        return res.text();
+      })
+      .then((csvText) => {
+        fetchResolved = true;
+        window.clearTimeout(timeoutId);
+        Papa.parse(csvText, {
+          header: true,
+          skipEmptyLines: true,
+          worker: true,
+          complete: (result) => {
+            if (cancelled) return;
+
+            try {
+              const sourceRows = result.data || [];
+              const cleanedRows = [];
+              let index = 0;
+              const chunkSize = 1200;
+
+              const processChunk = () => {
+                if (cancelled) {
+                  return;
+                }
+
+                const end = Math.min(index + chunkSize, sourceRows.length);
+                for (; index < end; index += 1) {
+                  const row = sourceRows[index];
+                  try {
+                    const dateObject = parseDate(row.pickup_date_parsed || row.pickup_date);
+                    const dropoffObject = parseDate(row.dropoff_date);
+                    const dateKey = toDateKey(dateObject);
+                    const dropoffDateKey = toDateKey(dropoffObject);
+                    const price = Number(row.price);
+
+                    if (!dateKey || !dropoffDateKey || !Number.isFinite(price)) {
+                      continue;
+                    }
+
+                    cleanedRows.push({
+                      dateKey,
+                      dropoffDate: row.dropoff_date ? String(row.dropoff_date).trim() : "",
+                      dropoffDateKey,
+                      company: normalize(row.company),
+                      vehicle: normalizeVehicle(row.vehicle),
+                      location: normalize(row.location),
+                      type: normalize(row.type),
+                      price,
+                      tripDays: calculateTripDays(dateObject, dropoffObject),
+                      scrapeDate: parseDate(row.scrape_date)
+                    });
+                  } catch {
+                    continue;
+                  }
+                }
+
+                if (index < sourceRows.length) {
+                  defaultSelectionTimer = window.setTimeout(processChunk, 0);
+                  return;
+                }
+
+                setRows(cleanedRows);
+                defaultSelectionTimer = window.setTimeout(() => {
+                  if (cancelled) {
+                    return;
+                  }
+
+                  const defaultRow = selectDefaultElementsRow(cleanedRows);
+                  if (defaultRow) {
+                    setVehicle(normalizeVehicle(defaultRow.vehicle));
+                    setSelectedDate(defaultRow.dateKey);
+                    setSelectedDropoff(defaultRow.dropoffDateKey);
+                  }
+                }, 0);
+                finishLoading();
+              };
+
+              processChunk();
+            } catch (err) {
+              setLoadError(err instanceof Error ? err.message : "CSV processing failed");
+              finishLoading();
+            }
+          },
+          error: (err) => {
+            if (!cancelled) {
+              setLoadError(err?.message || "CSV parse failed");
+              finishLoading();
+            }
+          }
+        });
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setLoadError(err instanceof Error ? err.message : "CSV fetch failed");
+          finishLoading();
+        }
+      });
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+      if (!fetchResolved) {
+        window.clearTimeout(timeoutId);
+      }
+      if (defaultSelectionTimer) {
+        window.clearTimeout(defaultSelectionTimer);
+      }
+      settled = true;
+    };
   }, []);
 
   useEffect(() => {
-    setLoading(true);
-    Papa.parse("/dataset_FINAL_SAFE.csv", {
-      download: true,
-      header: true,
-      skipEmptyLines: true,
-      complete: (result) => {
-        const cleanedRows = result.data
-          .map((row) => {
-            const dateObject = parseDate(row.pickup_date_parsed || row.pickup_date);
-            const dropoffObject = parseDate(row.dropoff_date);
-            const dateKey = toDateKey(dateObject);
-            const price = Number(row.price);
+    if (!loading) {
+      return;
+    }
 
-            return {
-              dateKey,
-              dropoffDate: row.dropoff_date ? String(row.dropoff_date).trim() : "",
-              dropoffDateKey: toDateKey(dropoffObject),
-              company: normalize(row.company),
-              vehicle: normalizeVehicleName(row.vehicle),
-              location: normalize(row.location),
-              type: normalize(row.type),
-              price,
-              tripDays: calculateTripDays(dateObject, dropoffObject),
-              scrapeDate: parseDate(row.scrape_date)
-            };
-          })
-          .filter(
-            (row) =>
-              row.dateKey &&
-              row.dropoffDateKey &&
-              row.company &&
-              row.vehicle &&
-              row.location &&
-              Number.isFinite(row.price)
-          );
+    const watchdogId = window.setTimeout(() => {
+      setLoadError((current) => current || "Dashboard load timed out");
+      setLoading(false);
+    }, 20000);
 
-        setRows(cleanedRows);
-        setLoading(false);
-      },
-      error: () => {
-        setRows([]);
-        setLoading(false);
-      }
-    });
-  }, [datasetVersion]);
+    return () => {
+      window.clearTimeout(watchdogId);
+    };
+  }, [loading]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1582,7 +1812,7 @@ function App() {
           (row) =>
             row.dateKey === pickupDate &&
             row.company === "elementsworld" &&
-            row.vehicle === vehicle
+            normalizeVehicle(row.vehicle) === normalizeVehicle(vehicle)
         )
         .map((row) => row.dropoffDateKey)
         .filter(Boolean)
@@ -1611,11 +1841,9 @@ function App() {
       return;
     }
 
-    setVehicle(bestRow.vehicle);
+    setVehicle(normalizeVehicle(bestRow.vehicle));
     setSelectedDate(bestRow.dateKey);
     setSelectedDropoff(bestRow.dropoffDateKey);
-
-    console.log("DEFAULT VALID ELEMENTS ROW:", bestRow);
   }, [rows, pickupDate, dropoffDate, vehicle]);
 
   useEffect(() => {
@@ -1627,7 +1855,7 @@ function App() {
       (row) =>
         row.dateKey === pickupDate &&
         row.company === "elementsworld" &&
-        row.vehicle === vehicle
+        normalizeVehicle(row.vehicle) === normalizeVehicle(vehicle)
     );
 
     if (
@@ -1665,45 +1893,77 @@ function App() {
     selectedDate && selectedDropoff && !exactTripMetrics.hasExactMatch
   );
 
-  console.log("ELEMENTS ROW USED:", elementsRow);
-
-  useEffect(() => {
-    console.log("COMPETITOR ROWS:", competitorQuoteSnapshot.rows);
-  }, [competitorQuoteSnapshot.rows]);
-
-  const activeConfig = vehicleConfigs[vehicle] || vehicleConfigs.trekcampers;
+  const activeConfig = vehicleConfigs[vehicle] || vehicleConfigs["trek budget"];
   const elementsPrice = exactTripMetrics.totalPrice;
-  const competitorPrices = competitorQuoteSnapshot.rows
+  const cheaperCompetitorRows =
+    elementsPrice !== null && elementsPrice !== undefined && !Number.isNaN(elementsPrice)
+      ? competitorQuoteSnapshot.rows.filter((row) => Number(row.price) < Number(elementsPrice))
+      : competitorQuoteSnapshot.rows;
+  const cheaperCompetitorPrices = cheaperCompetitorRows
     .map((row) => Number(row.price))
     .filter((price) => !Number.isNaN(price));
   const cheapestCompetitorPrice =
-    competitorPrices.length > 0 ? Math.min(...competitorPrices) : null;
-  const currentBaseline = getBaselinePrice(cheapestCompetitorPrice, elementsPrice);
+    cheaperCompetitorPrices.length > 0 ? Math.min(...cheaperCompetitorPrices) : null;
+  const currentBaseline = getBaselinePrice(
+    cheapestCompetitorPrice,
+    elementsPrice
+  );
   const currentRecommendation = calculateRecommendedPrice(
     currentBaseline.baselinePrice,
     exactTripMetrics.duration,
     adjustment
   );
-  const recommendedPrice =
+  const recommendedPriceRaw =
     currentRecommendation.recommendedTotalPrice === null ||
     currentRecommendation.recommendedTotalPrice === undefined ||
     Number.isNaN(currentRecommendation.recommendedTotalPrice)
       ? null
       : Math.round(currentRecommendation.recommendedTotalPrice);
+  const recommendedPrice =
+    recommendedPriceRaw === null &&
+    elementsPrice !== null &&
+    elementsPrice !== undefined &&
+    !Number.isNaN(elementsPrice)
+      ? Math.round(elementsPrice * (1 + adjustment / 100))
+      : recommendedPriceRaw;
   const recommendationDetail =
     currentBaseline.source === "competitor"
       ? "Suggested rate based on cheapest competitor plus selected margin adjustment"
       : currentBaseline.source === "elements"
-      ? "Suggested rate based on Elements price plus selected margin adjustment"
+      ? cheaperCompetitorRows.length === 0 &&
+        elementsPrice !== null &&
+        elementsPrice !== undefined &&
+        !Number.isNaN(elementsPrice)
+        ? "No cheaper competitors. Suggested rate based on Elements price plus selected margin adjustment"
+        : "Suggested rate based on Elements price plus selected margin adjustment"
       : "Insufficient competitor and Elements data";
   const recommendationSource = currentBaseline.source;
   const marketGap =
     elementsPrice !== null && competitorQuoteSnapshot.summary.average !== null
       ? elementsPrice - competitorQuoteSnapshot.summary.average
       : null;
-  const cheapestCompetitor = competitorQuoteSnapshot.summary.cheapestRow;
+  const cheapestCompetitor =
+    cheaperCompetitorRows.length > 0
+      ? cheaperCompetitorRows.reduce((min, row) =>
+          Number(row.price) < Number(min.price) ? row : min
+        )
+      : null;
   const highestCompetitor = competitorQuoteSnapshot.summary.highestRow;
   const latestRun = scraperStatus.latestRun;
+
+  if (loading) {
+    return <div style={{ padding: "20px" }}>Loading dashboard...</div>;
+  }
+
+  if (loadError) {
+    return (
+      <div style={{ padding: "20px" }}>
+        <h3>Dashboard failed to load</h3>
+        <p>{loadError}</p>
+        <p>Expected CSV path: /dataset_FINAL_TrekSAFE.csv</p>
+      </div>
+    );
+  }
 
   const toggleScrapeLocation = (nextLocation) => {
     setScrapeLocations((current) =>
@@ -1714,7 +1974,7 @@ function App() {
   };
 
   const refreshDataset = () => {
-    setDatasetVersion((current) => current + 1);
+    window.location.reload();
   };
 
   const triggerScrape = async (overrideLocations) => {
@@ -1851,26 +2111,82 @@ function App() {
 
             <label className="field">
               <span>Pickup date</span>
-              <input
-                type="date"
-                value={selectedDate}
-                onChange={(event) => setSelectedDate(event.target.value)}
-              />
+              <div style={{ position: "relative" }}>
+                <input
+                  type="text"
+                  value={formatDisplayDate(selectedDate)}
+                  readOnly
+                  onClick={() => openNativeDatePicker(pickupDateInputRef)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      openNativeDatePicker(pickupDateInputRef);
+                    }
+                  }}
+                  style={{
+                    width: "100%",
+                    padding: "10px",
+                    borderRadius: "8px",
+                    border: "1px solid #ccc",
+                    cursor: "pointer"
+                  }}
+                />
+                <input
+                  ref={pickupDateInputRef}
+                  type="date"
+                  value={selectedDate}
+                  onChange={handlePickupDateChange}
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    opacity: 0,
+                    width: 1,
+                    height: 1,
+                    pointerEvents: "none"
+                  }}
+                />
+              </div>
             </label>
 
             <label className="field">
               <span>Dropoff date</span>
-              <select
-                value={selectedDropoff}
-                onChange={(event) => setSelectedDropoff(event.target.value)}
-              >
-                <option value="">Select dropoff date</option>
-                {dropoffOptions.map((date) => (
-                  <option key={date} value={date}>
-                    {date}
-                  </option>
-                ))}
-              </select>
+              <div style={{ position: "relative" }}>
+                <input
+                  type="text"
+                  value={formatDisplayDate(selectedDropoff)}
+                  readOnly
+                  onClick={() => openNativeDatePicker(dropoffDateInputRef)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      openNativeDatePicker(dropoffDateInputRef);
+                    }
+                  }}
+                  style={{
+                    width: "100%",
+                    padding: "10px",
+                    borderRadius: "8px",
+                    border: "1px solid #ccc",
+                    cursor: "pointer"
+                  }}
+                />
+                <input
+                  ref={dropoffDateInputRef}
+                  type="date"
+                  value={selectedDropoff}
+                  onChange={handleDropoffDateChange}
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    opacity: 0,
+                    width: 1,
+                    height: 1,
+                    pointerEvents: "none"
+                  }}
+                />
+              </div>
             </label>
 
             <label className="field">
@@ -2026,7 +2342,7 @@ function App() {
                 <a href={`${SCRAPER_API_BASE}/api/health`} target="_blank" rel="noreferrer">
                   Open scraper health
                 </a>
-                <a href={`${SCRAPER_API_BASE}/data/dataset_FINAL_SAFE.csv`} target="_blank" rel="noreferrer">
+                <a href={`${SCRAPER_API_BASE}/data/dataset_FINAL_TrekSAFE.csv`} target="_blank" rel="noreferrer">
                   Open generated dataset
                 </a>
                 {latestRun?.artifacts?.csvPath ? (
@@ -2050,8 +2366,11 @@ function App() {
             marginTop: "10px"
           }}
         >
-          <p>Default Pickup: {selectedDate || "Not selected"}</p>
-          <p>Default Dropoff: {selectedDropoff || "Not selected"}</p>
+          <p>Default Pickup: {selectedDate ? formatDateDMY(selectedDate) : "Not selected"}</p>
+          <p>
+            Default Dropoff:{" "}
+            {selectedDropoff ? formatDateDMY(selectedDropoff) : "Not selected"}
+          </p>
         </div>
 
         {showNoTripData ? (
@@ -2100,16 +2419,20 @@ function App() {
             }
             detail={recommendationDetail}
           />
-          <StatCard
-            label="Lowest competitor price"
-            value={formatCurrency(competitorQuoteSnapshot.summary.lowest)}
-            detail={
-              cheapestCompetitor
-                ? `${cheapestCompetitor.company} \u2022 ${cheapestCompetitor.vehicle}`
-                : "No competitor rows for this filter set"
-            }
-            tone="canyon"
-          />
+            <StatCard
+              label="Lowest competitor price"
+              value={formatCurrency(competitorQuoteSnapshot.summary.lowest)}
+              detail={
+                cheapestCompetitor
+                  ? `${cheapestCompetitor.company} \u2022 ${cheapestCompetitor.vehicle}`
+                  : elementsPrice !== null &&
+                    elementsPrice !== undefined &&
+                    !Number.isNaN(elementsPrice)
+                  ? "No cheaper competitors"
+                  : "No competitor rows for this filter set"
+              }
+              tone="canyon"
+            />
           <StatCard
             label="Market Average"
             value={formatCurrency(competitorQuoteSnapshot.summary.average)}
@@ -2220,6 +2543,10 @@ function App() {
                 <strong>
                   {cheapestCompetitor
                     ? `${cheapestCompetitor.company} ${cheapestCompetitor.vehicle} at ${formatCurrency(cheapestCompetitor.price)}`
+                    : elementsPrice !== null &&
+                      elementsPrice !== undefined &&
+                      !Number.isNaN(elementsPrice)
+                    ? "No cheaper competitors"
                     : "Awaiting competitor data"}
                 </strong>
               </div>
