@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import Papa from "papaparse";
 import { AxisBottom, AxisLeft } from "@visx/axis";
 import { curveMonotoneX } from "@visx/curve";
 import { LinearGradient } from "@visx/gradient";
@@ -12,6 +11,8 @@ import "./App.css";
 
 const SCRAPER_API_BASE =
   process.env.REACT_APP_SCRAPER_API_URL || "http://localhost:4301";
+const PRICING_API_BASE =
+  process.env.REACT_APP_PRICING_API_URL || "http://localhost:4302";
 
 const vehicleConfigs = {
   "trek budget": {
@@ -1688,6 +1689,7 @@ function MarketSpreadChart({
 
 function App() {
   const [rows, setRows] = useState([]);
+  const [trendData, setTrendData] = useState([]);
   const [activeTab, setActiveTab] = useState("overview");
   const [isUiTransitioning, setIsUiTransitioning] = useState(false);
   const [vehicle, setVehicle] = useState("");
@@ -1695,9 +1697,11 @@ function App() {
   const [location, setLocation] = useState("");
   const [selectedDate, setSelectedDate] = useState("");
   const [selectedDropoff, setSelectedDropoff] = useState("");
+  const [isDropoffUserSelected, setIsDropoffUserSelected] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [dashboard, setDashboard] = useState(initialDashboard);
+  const [trendDashboard, setTrendDashboard] = useState(initialDashboard);
   const [scrapePickupDate, setScrapePickupDate] = useState(() =>
     new Date().toISOString().slice(0, 10)
   );
@@ -1715,9 +1719,11 @@ function App() {
   const dropoffDate = selectedDropoff;
   const handlePickupDateChange = (event) => {
     setSelectedDate(event.target.value);
+    setIsDropoffUserSelected(false);
   };
   const handleDropoffDateChange = (event) => {
     setSelectedDropoff(event.target.value);
+    setIsDropoffUserSelected(true);
   };
   const openNativeDatePicker = (inputRef) => {
     const input = inputRef.current;
@@ -1745,142 +1751,90 @@ function App() {
   useEffect(() => {
     let cancelled = false;
     const controller = new AbortController();
-    let defaultSelectionTimer = null;
-    let fetchResolved = false;
-    let settled = false;
-    const timeoutId = window.setTimeout(() => {
-      if (!cancelled && !settled) {
-        settled = true;
-        controller.abort();
-        setLoadError("CSV fetch timed out");
-        setLoading(false);
-      }
-    }, 30000);
-
-    const finishLoading = () => {
-      if (settled) {
-        return;
-      }
-
-      settled = true;
-      window.clearTimeout(timeoutId);
-      setLoading(false);
-    };
+    const timeoutId = window.setTimeout(() => controller.abort(), 30000);
 
     setLoading(true);
     setLoadError("");
+    const loadData = async () => {
+      try {
+        const pricesUrl = `${PRICING_API_BASE}/api/prices`;
+        const trendsUrl = `${PRICING_API_BASE}/api/trends`;
 
-    fetch("/dataset_FINAL_TrekSAFE.csv", { signal: controller.signal })
-      .then((res) => {
-        if (!res.ok) {
-          throw new Error(`CSV fetch failed: ${res.status}`);
+        const [pricesResponse, trendsResponse] = await Promise.all([
+          fetch(pricesUrl, { signal: controller.signal }),
+          fetch(trendsUrl, { signal: controller.signal })
+        ]);
+
+        if (!pricesResponse.ok) {
+          throw new Error(`Failed to fetch data from API (status: ${pricesResponse.status})`);
         }
-        return res.text();
-      })
-      .then((csvText) => {
-        fetchResolved = true;
-        window.clearTimeout(timeoutId);
-        Papa.parse(csvText, {
-          header: true,
-          skipEmptyLines: true,
-          worker: true,
-          complete: (result) => {
-            if (cancelled) return;
+        if (!trendsResponse.ok) {
+          throw new Error(`Failed to fetch data from API (status: ${trendsResponse.status})`);
+        }
 
-            try {
-              const sourceRows = result.data || [];
-              const cleanedRows = [];
-              let index = 0;
-              const chunkSize = 1200;
+        const [pricesApiRows, trendsApiRows] = await Promise.all([
+          pricesResponse.json(),
+          trendsResponse.json()
+        ]);
 
-              const processChunk = () => {
-                if (cancelled) {
-                  return;
-                }
+        if (cancelled) {
+          return;
+        }
 
-                const end = Math.min(index + chunkSize, sourceRows.length);
-                for (; index < end; index += 1) {
-                  const row = sourceRows[index];
-                  try {
-                    const dateObject = parseDate(row.pickup_date_parsed || row.pickup_date);
-                    const dropoffObject = parseDate(row.dropoff_date);
-                    const dateKey = toDateKey(dateObject);
-                    const dropoffDateKey = toDateKey(dropoffObject);
-                    const price = Number(row.price);
+        const toDashboardRows = (sourceRows) =>
+          (Array.isArray(sourceRows) ? sourceRows : [])
+            .map((row) => {
+              const dateObject = parseDate(row.pickup_date);
+              const dropoffObject = parseDate(row.dropoff_date);
+              const dateKey = toDateKey(dateObject);
+              const dropoffDateKey = toDateKey(dropoffObject);
+              const price = Number(row.price);
 
-                    if (!dateKey || !dropoffDateKey || !Number.isFinite(price)) {
-                      continue;
-                    }
+              if (!dateKey || !dropoffDateKey || !Number.isFinite(price)) {
+                return null;
+              }
 
-                    cleanedRows.push({
-                      dateKey,
-                      dropoffDate: row.dropoff_date ? String(row.dropoff_date).trim() : "",
-                      dropoffDateKey,
-                      company: normalize(row.company),
-                      vehicle: normalizeVehicle(row.vehicle),
-                      location: normalize(row.location),
-                      type: normalize(row.type),
-                      price,
-                      tripDays: calculateTripDays(dateObject, dropoffObject),
-                      scrapeDate: parseDate(row.scrape_date)
-                    });
-                  } catch {
-                    continue;
-                  }
-                }
-
-                if (index < sourceRows.length) {
-                  defaultSelectionTimer = window.setTimeout(processChunk, 0);
-                  return;
-                }
-
-                setRows(cleanedRows);
-                defaultSelectionTimer = window.setTimeout(() => {
-                  if (cancelled) {
-                    return;
-                  }
-
-                  const defaultRow = selectDefaultElementsRow(cleanedRows);
-                  if (defaultRow) {
-                    setVehicle(normalizeVehicle(defaultRow.vehicle));
-                    setSelectedDate(defaultRow.dateKey);
-                    setSelectedDropoff(defaultRow.dropoffDateKey);
-                  }
-                }, 0);
-                finishLoading();
+              return {
+                dateKey,
+                dropoffDate: row.dropoff_date ? String(row.dropoff_date).trim() : "",
+                dropoffDateKey,
+                company: normalize(row.company),
+                vehicle: normalizeVehicle(row.vehicle),
+                location: normalize(row.location),
+                type: normalize(row.type),
+                price,
+                tripDays: calculateTripDays(dateObject, dropoffObject),
+                scrapeDate: parseDate(row.scrape_date)
               };
+            })
+            .filter(Boolean);
 
-              processChunk();
-            } catch (err) {
-              setLoadError(err instanceof Error ? err.message : "CSV processing failed");
-              finishLoading();
-            }
-          },
-          error: (err) => {
-            if (!cancelled) {
-              setLoadError(err?.message || "CSV parse failed");
-              finishLoading();
-            }
-          }
-        });
-      })
-      .catch((err) => {
+        const cleanedRows = toDashboardRows(pricesApiRows);
+        const cleanedTrendRows = toDashboardRows(trendsApiRows);
+
+        setRows(cleanedRows);
+        setTrendData(cleanedTrendRows);
+        console.log("Prices count:", cleanedRows.length);
+        console.log("Trends count:", cleanedTrendRows.length);
+      } catch (err) {
         if (!cancelled) {
-          setLoadError(err instanceof Error ? err.message : "CSV fetch failed");
-          finishLoading();
+          console.error("API error:", err);
+          setLoadError(err instanceof Error ? err.message : "Failed to fetch data from API");
         }
-      });
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+        window.clearTimeout(timeoutId);
+      }
+    };
+
+    loadData();
 
     return () => {
       cancelled = true;
       controller.abort();
-      if (!fetchResolved) {
-        window.clearTimeout(timeoutId);
-      }
-      if (defaultSelectionTimer) {
-        window.clearTimeout(defaultSelectionTimer);
-      }
-      settled = true;
+      window.clearTimeout(timeoutId);
     };
   }, []);
 
@@ -1971,6 +1925,39 @@ function App() {
     );
   }, [adjustment, location, rows, selectedDate, vehicle]);
 
+  useEffect(() => {
+    if (!trendData.length) {
+      setTrendDashboard(initialDashboard);
+      return;
+    }
+
+    const config = vehicleConfigs[vehicle];
+    if (!config) {
+      setTrendDashboard(initialDashboard);
+      return;
+    }
+
+    const relevantTrendRows = [];
+
+    trendData.forEach((row) => {
+      if (location && row.location !== location) {
+        return;
+      }
+
+      relevantTrendRows.push(row);
+    });
+
+    setTrendDashboard(
+      buildDashboardFromRows({
+        rows: relevantTrendRows,
+        config,
+        adjustment,
+        selectedDate,
+        selectedVehicle: vehicle
+      })
+    );
+  }, [adjustment, location, trendData, selectedDate, vehicle]);
+
   const dropoffOptions = Array.from(
     new Set(
       rows
@@ -2031,10 +2018,10 @@ function App() {
       return;
     }
 
-    if (matchingRows.length > 0) {
+    if (!isDropoffUserSelected && matchingRows.length > 0) {
       setSelectedDropoff(matchingRows[0].dropoffDateKey);
     }
-  }, [pickupDate, selectedDropoff, vehicle, rows]);
+  }, [pickupDate, selectedDropoff, isDropoffUserSelected, vehicle, rows]);
 
   const exactTripMetrics = buildExactTripMetrics({
     rows,
@@ -2085,52 +2072,44 @@ function App() {
   const hasElementsPrice =
     elementsPrice !== null && elementsPrice !== undefined && !Number.isNaN(elementsPrice);
   const hasCompetitorData = competitorPrices.length > 0;
-  const recommendationCompetitorRows = hasElementsPrice
-    ? competitorRows.filter((row) => Number(row.price) < Number(elementsPrice))
-    : competitorRows;
-  const recommendationCompetitorPrices = recommendationCompetitorRows
-    .map((row) => Number(row.price))
-    .filter((price) => !Number.isNaN(price));
-  const recommendationCheapestCompetitor =
-    recommendationCompetitorPrices.length > 0
-      ? Math.min(...recommendationCompetitorPrices)
-      : null;
+  const hasCompetitors = competitorPrices.length > 0;
+  let recommendationBaselinePrice = null;
+  let recommendationReasonMessage = "No competitor data available. Using Elements price as fallback";
+  let recommendationSource = null;
+
+  if (hasCompetitors) {
+    if (
+      hasElementsPrice &&
+      cheapestCompetitor !== null &&
+      cheapestCompetitor < Number(elementsPrice)
+    ) {
+      recommendationBaselinePrice = cheapestCompetitor;
+      recommendationReasonMessage = "Using cheapest competitor as baseline";
+      recommendationSource = "competitor";
+    } else {
+      recommendationBaselinePrice = hasElementsPrice ? elementsPrice : null;
+      recommendationReasonMessage =
+        "All competitors priced above Elements. Using Elements price as baseline";
+      recommendationSource = hasElementsPrice ? "elements" : null;
+    }
+  } else {
+    recommendationBaselinePrice = hasElementsPrice ? elementsPrice : null;
+    recommendationReasonMessage = "No competitor data available. Using Elements price as fallback";
+    recommendationSource = hasElementsPrice ? "elements" : null;
+  }
+
   const noCompetitorsCheaperThanElements =
     hasCompetitorData && hasElementsPrice && cheapestCompetitor >= Number(elementsPrice);
   const competitorStatusMessage = hasCompetitorData
     ? "No competitors cheaper than Elements"
     : "No competitor data available for selected date";
-  const currentBaseline = getBaselinePrice(
-    recommendationCheapestCompetitor,
-    elementsPrice
-  );
-  const currentRecommendation = calculateRecommendedPrice(
-    currentBaseline.baselinePrice,
-    exactTripMetrics.duration,
-    adjustment
-  );
-  const recommendedPriceRaw =
-    currentRecommendation.recommendedTotalPrice === null ||
-    currentRecommendation.recommendedTotalPrice === undefined ||
-    Number.isNaN(currentRecommendation.recommendedTotalPrice)
-      ? null
-      : Math.round(currentRecommendation.recommendedTotalPrice);
   const recommendedPrice =
-    recommendedPriceRaw === null &&
-    elementsPrice !== null &&
-    elementsPrice !== undefined &&
-    !Number.isNaN(elementsPrice)
-      ? Math.round(elementsPrice * (1 + adjustment / 100))
-      : recommendedPriceRaw;
-  const recommendationDetail =
-    currentBaseline.source === "competitor"
-      ? "Suggested rate based on cheapest competitor plus selected margin adjustment"
-      : currentBaseline.source === "elements"
-      ? noCompetitorsCheaperThanElements
-        ? "No competitors cheaper than Elements. Suggested rate based on Elements price plus selected margin adjustment"
-        : "Suggested rate based on Elements price plus selected margin adjustment"
-      : "Insufficient competitor and Elements data";
-  const recommendationSource = currentBaseline.source;
+    recommendationBaselinePrice === null ||
+    recommendationBaselinePrice === undefined ||
+    Number.isNaN(recommendationBaselinePrice)
+      ? null
+      : Math.round(recommendationBaselinePrice * (1 + adjustment / 100));
+  const recommendationDetail = recommendationReasonMessage;
   const marketGap =
     elementsPrice !== null && competitorQuoteSnapshot.summary.average !== null
       ? elementsPrice - competitorQuoteSnapshot.summary.average
@@ -2299,7 +2278,7 @@ function App() {
     setIsUiTransitioning(true);
     const timer = window.setTimeout(() => setIsUiTransitioning(false), 220);
     return () => window.clearTimeout(timer);
-  }, [activeTab, selectedDate, selectedDropoff]);
+  }, [activeTab]);
 
   if (loading) {
     return <div style={{ padding: "20px" }}>Loading dashboard...</div>;
@@ -2310,7 +2289,7 @@ function App() {
       <div style={{ padding: "20px" }}>
         <h3>Dashboard failed to load</h3>
         <p>{loadError}</p>
-        <p>Expected CSV path: /dataset_FINAL_TrekSAFE.csv</p>
+        <p>Failed to fetch data from API</p>
       </div>
     );
   }
@@ -2594,12 +2573,6 @@ function App() {
             </section>
           ) : null}
 
-          {competitorPrices.length < 2 ? (
-            <p className="limited-data-note">
-              Limited competitor data — recommendation based on available inputs
-            </p>
-          ) : null}
-
           {activeTab === "overview" ? (
             <>
             <section className="stats-grid">
@@ -2640,11 +2613,7 @@ function App() {
             value={
               recommendedPrice === null ? "N/A" : formatCurrency(recommendedPrice)
             }
-            detail={
-              noCompetitorsCheaperThanElements || competitorPrices.length === 0
-                ? "Based on Elements price + margin"
-                : `Based on ${formatCount(competitorPrices.length)} competitors`
-            }
+            detail={recommendationReasonMessage}
             tone="pine"
           />
             <StatCard
@@ -2702,8 +2671,10 @@ function App() {
                   Current guidance lands at {formatCurrency(recommendedPrice)},{" "}
                   {recommendationSource === "competitor"
                     ? "anchored to the cheapest observed competitor for this selection."
+                    : recommendationSource === "elements" && hasCompetitors
+                    ? "using the Elements baseline because competitors are priced above Elements."
                     : recommendationSource === "elements"
-                    ? "using the Elements price fallback for this selection."
+                    ? "using the Elements baseline due to no competitor data for this selection."
                     : "awaiting a usable baseline for this selection."}
                 </p>
               </article>
@@ -2810,7 +2781,7 @@ function App() {
                 <div className="chart-empty">{"Loading market history\u2026"}</div>
               ) : (
                 <PriceTrendChart
-                  data={dashboard.trend}
+                  data={trendDashboard.trend}
                   selectedPickupDate={selectedDate}
                 />
               )}
@@ -3153,6 +3124,7 @@ function App() {
 }
 
 export default App;
+
 
 
 
