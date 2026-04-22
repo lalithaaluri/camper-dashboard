@@ -108,15 +108,6 @@ const initialScraperStatus = {
   error: ""
 };
 
-const competitorMap = {
-  "trek budget": ["stationwagen"],
-  "trek budget camper": ["stationwagen"],
-  "trek medium": ["sleeper"],
-  "trek medium camper": ["sleeper"],
-  "trek large": ["aventus2"],
-  "trek large camper": ["aventus2"]
-};
-
 const normalize = (value) =>
   String(value || "").toLowerCase().replace(/\s+/g, "");
 
@@ -132,7 +123,9 @@ function normalizeVehicle(v) {
   if (compact.includes("tandemdeluxe")) return "tandemdeluxe";
   if (compact.includes("tandem")) return "tandem";
   if (compact.includes("quad")) return "quad";
-  if (compact.includes("six")) return "sixer";
+  if (compact.includes("bigsix")) return "bigsix";
+  if (compact.includes("doubleup")) return "doubleup";
+  if (compact.includes("sixer")) return "sixer";
 
   if (compact.includes("stationwagen") || compact.includes("stationwagon")) return "stationwagen";
   if (compact.includes("sleeper")) return "sleeper";
@@ -145,9 +138,6 @@ function normalizeVehicle(v) {
   if (compact.includes("delite")) return "delite";
   if (compact.includes("condo")) return "condo";
   if (compact.includes("rover")) return "rover";
-  if (compact.includes("doubleup")) return "doubleup";
-  if (compact.includes("bigsix")) return "bigsix";
-
   return v.trim().replace(/\s+/g, " ");
 }
 
@@ -225,6 +215,14 @@ const formatCurrency = (value) => {
     currency: "NZD",
     maximumFractionDigits: 0
   }).format(value);
+};
+
+const formatPercentValue = (value) => {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return "0%";
+  }
+
+  return `${Number.parseFloat(Math.abs(value).toFixed(1))}%`;
 };
 
 export const compareScrapeDates = (left, right) => {
@@ -326,9 +324,9 @@ const getBaselinePrice = (cheapestCompetitorPrice, elementsPrice) => {
 };
 
 export const getMappedCompetitors = (selectedVehicle = "") =>
-  competitorMap[normalizeVehicle(selectedVehicle)]
-    ? competitorMap[normalizeVehicle(selectedVehicle)].map((entry) => normalize(entry))
-    : vehicleConfigs[normalizeVehicle(selectedVehicle)]?.competitorVehicles || [];
+  (vehicleConfigs[normalizeVehicle(selectedVehicle)]?.competitorVehicles || []).map((entry) =>
+    normalize(entry)
+  );
 
 export const buildCompetitorQuoteSnapshot = ({
   rows,
@@ -1093,7 +1091,9 @@ function FilterChip({ active, children, onClick }) {
   );
 }
 
-function PriceTrendChart({ data }) {
+function PriceTrendChart({ data, selectedPickupDate = "" }) {
+  const [hoveredDateKey, setHoveredDateKey] = useState("");
+
   return (
     <ParentSize debounceTime={10}>
       {({ width }) => {
@@ -1134,6 +1134,98 @@ function PriceTrendChart({ data }) {
         const tickValues = data
           .filter((_, index) => index % tickStep === 0 || index === data.length - 1)
           .map((item) => item.dateKey);
+        const selectedX = selectedPickupDate ? xScale(selectedPickupDate) : undefined;
+        const activeTooltipItem = hoveredDateKey
+          ? data.find((item) => item.dateKey === hoveredDateKey) || null
+          : null;
+        const activeTooltipX = activeTooltipItem
+          ? xScale(activeTooltipItem.dateKey) ?? 0
+          : 0;
+        const tooltipLines = activeTooltipItem
+          ? [
+              `Date: ${formatDateLabel(activeTooltipItem.dateKey, { year: "numeric" })}`,
+              `Elements: ${formatCurrency(activeTooltipItem.elements)}`,
+              `Cheapest: ${formatCurrency(activeTooltipItem.lowest)}`,
+              `Highest: ${formatCurrency(activeTooltipItem.highest)}`,
+              `Recommended: ${formatCurrency(activeTooltipItem.recommended)}`
+            ]
+          : [];
+        const tooltipWidth = 222;
+        const tooltipHeight = 112;
+        const tooltipX = Math.max(
+          0,
+          Math.min(innerWidth - tooltipWidth, activeTooltipX + 14)
+        );
+        const tooltipY = 8;
+        const latestPoint = data[data.length - 1];
+        const latestX = latestPoint ? xScale(latestPoint.dateKey) ?? 0 : 0;
+        const latestLabelAnchor =
+          latestX < innerWidth - 130 ? "start" : "end";
+        const latestLabelX = latestLabelAnchor === "start" ? latestX + 10 : latestX - 10;
+        const latestLabels = latestPoint
+          ? [
+              {
+                key: "elements",
+                value: latestPoint.elements,
+                color: "#2d6a4f",
+                y: latestPoint.elements !== null ? yScale(latestPoint.elements) - 12 : null
+              },
+              {
+                key: "lowest",
+                value: latestPoint.lowest,
+                color: "#c96c34",
+                y: latestPoint.lowest !== null ? yScale(latestPoint.lowest) + 16 : null
+              },
+              {
+                key: "highest",
+                value: latestPoint.highest,
+                color: "#d8a15d",
+                y: latestPoint.highest !== null ? yScale(latestPoint.highest) - 22 : null
+              },
+              {
+                key: "recommended",
+                value: latestPoint.recommended,
+                color: "#1b4332",
+                y:
+                  latestPoint.recommended !== null
+                    ? yScale(latestPoint.recommended) + 28
+                    : null
+              }
+            ].filter((entry) => entry.value !== null && entry.y !== null)
+          : [];
+        const points = data.flatMap((item) => [
+          { key: "elements", label: "Elements", value: item.elements, dateKey: item.dateKey },
+          { key: "lowest", label: "Cheapest", value: item.lowest, dateKey: item.dateKey },
+          { key: "highest", label: "Highest", value: item.highest, dateKey: item.dateKey },
+          { key: "recommended", label: "Recommended", value: item.recommended, dateKey: item.dateKey }
+        ]);
+        const validPoints = points.filter(
+          (point) => point.value !== null && point.value !== undefined && !Number.isNaN(point.value)
+        );
+        const maxPoint =
+          validPoints.length > 0
+            ? validPoints.reduce((max, point) => (point.value > max.value ? point : max))
+            : null;
+        const minPoint =
+          validPoints.length > 0
+            ? validPoints.reduce((min, point) => (point.value < min.value ? point : min))
+            : null;
+        const extremeLabels = [maxPoint, minPoint]
+          .filter(Boolean)
+          .map((point, index) => {
+            const x = xScale(point.dateKey) ?? 0;
+            const y = yScale(point.value);
+            return {
+              id: `${point.key}-${point.dateKey}-${index}`,
+              text: `${point.label}: ${formatCurrency(point.value)}`,
+              x: Math.max(8, Math.min(innerWidth - 8, x)),
+              y:
+                index % 2 === 0
+                  ? Math.max(14, y - 14)
+                  : Math.min(innerHeight - 8, y + 16),
+              anchor: x < innerWidth - 120 ? "start" : "end"
+            };
+          });
 
         return (
           <svg width={safeWidth} height={height} role="img" aria-label="Pricing trend chart">
@@ -1148,6 +1240,19 @@ function PriceTrendChart({ data }) {
             />
             <rect width={safeWidth} height={height} rx={24} fill="url(#trend-surface)" />
             <Group left={margin.left} top={margin.top}>
+              {selectedX !== undefined ? (
+                <line
+                  x1={selectedX}
+                  x2={selectedX}
+                  y1={0}
+                  y2={innerHeight}
+                  stroke="#1b4332"
+                  strokeWidth={2}
+                  strokeDasharray="6 6"
+                  opacity={0.5}
+                />
+              ) : null}
+
               {yScale.ticks(4).map((tick) => (
                 <line
                   key={tick}
@@ -1210,45 +1315,59 @@ function PriceTrendChart({ data }) {
                     series.length * barWidth + Math.max(0, series.length - 1) * gap;
                   const startX = centerX - totalWidth / 2;
 
-                  return series.map((entry, index) => {
-                    const value = entry.value ?? 0;
-                    const x = startX + index * (barWidth + gap);
-                    const y = yScale(value);
-                    const barHeight = innerHeight - y;
-                    const tooltip = (() => {
-                      if (entry.key === "lowest") {
-                        return `Cheapest: ${formatCompetitorLabel(item.cheapestRow)}`;
-                      }
+                  return (
+                    <>
+                      {series.map((entry, index) => {
+                        const value = entry.value ?? 0;
+                        const x = startX + index * (barWidth + gap);
+                        const y = yScale(value);
+                        const barHeight = innerHeight - y;
+                        const tooltip = (() => {
+                          if (entry.key === "lowest") {
+                            return `Cheapest: ${formatCompetitorLabel(item.cheapestRow)}`;
+                          }
 
-                      if (entry.key === "highest") {
-                        return `Highest: ${formatCompetitorLabel(item.highestRow)}`;
-                      }
+                          if (entry.key === "highest") {
+                            return `Highest: ${formatCompetitorLabel(item.highestRow)}`;
+                          }
 
-                      if (entry.key === "elements") {
-                        return `Elements: ${formatCurrency(item.elements)}`;
-                      }
+                          if (entry.key === "elements") {
+                            return `Elements: ${formatCurrency(item.elements)}`;
+                          }
 
-                      return `Recommended: ${formatCurrency(item.recommended)}`;
-                    })();
+                          return `Recommended: ${formatCurrency(item.recommended)}`;
+                        })();
 
-                    return (
-                      <g key={entry.key}>
-                        <title>{tooltip}</title>
-                        <Bar
-                          x={x}
-                          y={y}
-                          width={barWidth}
-                          height={barHeight}
-                          rx={12}
-                          fill={entry.fill}
-                          stroke={entry.fill}
-                          strokeWidth={entry.dash ? 2 : 0}
-                          fillOpacity={entry.dash ? 0.14 : 0.92}
-                          strokeDasharray={entry.dash}
-                        />
-                      </g>
-                    );
-                  });
+                        return (
+                          <g key={entry.key}>
+                            <title>{tooltip}</title>
+                            <Bar
+                              x={x}
+                              y={y}
+                              width={barWidth}
+                              height={barHeight}
+                              rx={12}
+                              fill={entry.fill}
+                              stroke={entry.fill}
+                              strokeWidth={entry.dash ? 2 : 0}
+                              fillOpacity={entry.dash ? 0.14 : 0.92}
+                              strokeDasharray={entry.dash}
+                            />
+                          </g>
+                        );
+                      })}
+                      <rect
+                        x={0}
+                        y={0}
+                        width={innerWidth}
+                        height={innerHeight}
+                        fill="transparent"
+                        onMouseEnter={() => setHoveredDateKey(item.dateKey)}
+                        onMouseMove={() => setHoveredDateKey(item.dateKey)}
+                        onMouseLeave={() => setHoveredDateKey("")}
+                      />
+                    </>
+                  );
                 })()
               ) : (
                 <>
@@ -1288,12 +1407,6 @@ function PriceTrendChart({ data }) {
 
                   {data.map((item) => {
                     const x = xScale(item.dateKey) ?? 0;
-                    const tooltip = [
-                      `Date: ${formatDateLabel(item.dateKey, { year: "numeric" })}`,
-                      `Cheapest: ${formatCompetitorLabel(item.cheapestRow)}`,
-                      `Highest: ${formatCompetitorLabel(item.highestRow)}`,
-                      `Elements: ${formatCurrency(item.elements)}`
-                    ].join("\n");
                     return (
                       <g key={item.dateKey}>
                         <rect
@@ -1302,9 +1415,10 @@ function PriceTrendChart({ data }) {
                           width={36}
                           height={innerHeight}
                           fill="transparent"
-                        >
-                          <title>{tooltip}</title>
-                        </rect>
+                          onMouseEnter={() => setHoveredDateKey(item.dateKey)}
+                          onMouseMove={() => setHoveredDateKey(item.dateKey)}
+                          onMouseLeave={() => setHoveredDateKey("")}
+                        />
                         {item.lowest !== null ? (
                           <circle cx={x} cy={yScale(item.lowest)} r={4} fill="#c96c34" />
                         ) : null}
@@ -1317,8 +1431,58 @@ function PriceTrendChart({ data }) {
                       </g>
                     );
                   })}
+
                 </>
               )}
+
+              {latestLabels.map((entry) => (
+                <Text
+                  key={entry.key}
+                  x={latestLabelX}
+                  y={Math.max(14, Math.min(innerHeight - 8, entry.y))}
+                  textAnchor={latestLabelAnchor}
+                  fill={entry.color}
+                  fontSize={11}
+                >
+                  {formatCurrency(entry.value)}
+                </Text>
+              ))}
+
+              {extremeLabels.map((entry) => (
+                <Text
+                  key={entry.id}
+                  x={entry.x}
+                  y={entry.y}
+                  textAnchor={entry.anchor}
+                  fill="#435045"
+                  fontSize={10}
+                >
+                  {entry.text}
+                </Text>
+              ))}
+
+              {activeTooltipItem ? (
+                <Group left={tooltipX} top={tooltipY}>
+                  <rect
+                    width={tooltipWidth}
+                    height={tooltipHeight}
+                    rx={12}
+                    fill="rgba(27, 48, 38, 0.92)"
+                    stroke="rgba(255, 255, 255, 0.25)"
+                  />
+                  {tooltipLines.map((line, index) => (
+                    <Text
+                      key={line}
+                      x={12}
+                      y={20 + index * 18}
+                      fill="#f5f7f6"
+                      fontSize={11}
+                    >
+                      {line}
+                    </Text>
+                  ))}
+                </Group>
+              ) : null}
             </Group>
           </svg>
         );
@@ -1524,6 +1688,8 @@ function MarketSpreadChart({
 
 function App() {
   const [rows, setRows] = useState([]);
+  const [activeTab, setActiveTab] = useState("overview");
+  const [isUiTransitioning, setIsUiTransitioning] = useState(false);
   const [vehicle, setVehicle] = useState("");
   const [adjustment, setAdjustment] = useState(5);
   const [location, setLocation] = useState("");
@@ -1889,23 +2055,53 @@ function App() {
     elementsRow,
     competitorRows: competitorQuoteSnapshot.rows
   });
+  const quoteRows = competitorQuoteSnapshot.rows;
   const showNoTripData = Boolean(
     selectedDate && selectedDropoff && !exactTripMetrics.hasExactMatch
   );
 
   const activeConfig = vehicleConfigs[vehicle] || vehicleConfigs["trek budget"];
   const elementsPrice = exactTripMetrics.totalPrice;
-  const cheaperCompetitorRows =
-    elementsPrice !== null && elementsPrice !== undefined && !Number.isNaN(elementsPrice)
-      ? competitorQuoteSnapshot.rows.filter((row) => Number(row.price) < Number(elementsPrice))
-      : competitorQuoteSnapshot.rows;
-  const cheaperCompetitorPrices = cheaperCompetitorRows
+  const competitorRows = competitorQuoteSnapshot.rows;
+  const competitorPrices = competitorRows
     .map((row) => Number(row.price))
     .filter((price) => !Number.isNaN(price));
-  const cheapestCompetitorPrice =
-    cheaperCompetitorPrices.length > 0 ? Math.min(...cheaperCompetitorPrices) : null;
+  const cheapestCompetitor =
+    competitorPrices.length > 0 ? Math.min(...competitorPrices) : null;
+  const highestCompetitor =
+    competitorPrices.length > 0 ? Math.max(...competitorPrices) : null;
+  const cheapestCompetitorRow =
+    competitorPrices.length > 0
+      ? competitorRows.reduce((min, row) =>
+          Number(row.price) < Number(min.price) ? row : min
+        )
+      : null;
+  const highestCompetitorRow =
+    competitorPrices.length > 0
+      ? competitorRows.reduce((max, row) =>
+          Number(row.price) > Number(max.price) ? row : max
+        )
+      : null;
+  const hasElementsPrice =
+    elementsPrice !== null && elementsPrice !== undefined && !Number.isNaN(elementsPrice);
+  const hasCompetitorData = competitorPrices.length > 0;
+  const recommendationCompetitorRows = hasElementsPrice
+    ? competitorRows.filter((row) => Number(row.price) < Number(elementsPrice))
+    : competitorRows;
+  const recommendationCompetitorPrices = recommendationCompetitorRows
+    .map((row) => Number(row.price))
+    .filter((price) => !Number.isNaN(price));
+  const recommendationCheapestCompetitor =
+    recommendationCompetitorPrices.length > 0
+      ? Math.min(...recommendationCompetitorPrices)
+      : null;
+  const noCompetitorsCheaperThanElements =
+    hasCompetitorData && hasElementsPrice && cheapestCompetitor >= Number(elementsPrice);
+  const competitorStatusMessage = hasCompetitorData
+    ? "No competitors cheaper than Elements"
+    : "No competitor data available for selected date";
   const currentBaseline = getBaselinePrice(
-    cheapestCompetitorPrice,
+    recommendationCheapestCompetitor,
     elementsPrice
   );
   const currentRecommendation = calculateRecommendedPrice(
@@ -1930,11 +2126,8 @@ function App() {
     currentBaseline.source === "competitor"
       ? "Suggested rate based on cheapest competitor plus selected margin adjustment"
       : currentBaseline.source === "elements"
-      ? cheaperCompetitorRows.length === 0 &&
-        elementsPrice !== null &&
-        elementsPrice !== undefined &&
-        !Number.isNaN(elementsPrice)
-        ? "No cheaper competitors. Suggested rate based on Elements price plus selected margin adjustment"
+      ? noCompetitorsCheaperThanElements
+        ? "No competitors cheaper than Elements. Suggested rate based on Elements price plus selected margin adjustment"
         : "Suggested rate based on Elements price plus selected margin adjustment"
       : "Insufficient competitor and Elements data";
   const recommendationSource = currentBaseline.source;
@@ -1942,14 +2135,171 @@ function App() {
     elementsPrice !== null && competitorQuoteSnapshot.summary.average !== null
       ? elementsPrice - competitorQuoteSnapshot.summary.average
       : null;
-  const cheapestCompetitor =
-    cheaperCompetitorRows.length > 0
-      ? cheaperCompetitorRows.reduce((min, row) =>
-          Number(row.price) < Number(min.price) ? row : min
-        )
+  const marketAverage = competitorQuoteSnapshot.summary.average;
+  const hasMarketAverage =
+    marketAverage !== null &&
+    marketAverage !== undefined &&
+    !Number.isNaN(marketAverage) &&
+    marketAverage !== 0;
+  const pricingDiffPercent =
+    hasElementsPrice && hasMarketAverage
+      ? ((elementsPrice - marketAverage) / marketAverage) * 100
       : null;
-  const highestCompetitor = competitorQuoteSnapshot.summary.highestRow;
+  const pricingPositioningInsight =
+    pricingDiffPercent === null
+      ? "Pricing position unavailable for this selection"
+      : pricingDiffPercent < 0
+      ? `Elements is underpriced by ${formatPercentValue(pricingDiffPercent)} compared to market`
+      : pricingDiffPercent > 0
+      ? `Elements is overpriced by ${formatPercentValue(pricingDiffPercent)}`
+      : "Elements is priced in line with market";
+  const actionThresholdPercent = 5;
+  const recommendedActionInsight =
+    pricingDiffPercent === null
+      ? "Maintain current price"
+      : pricingDiffPercent <= -actionThresholdPercent
+      ? `Increase price by ${formatPercentValue(pricingDiffPercent)}`
+      : pricingDiffPercent >= actionThresholdPercent
+      ? `Reduce price by ${formatPercentValue(pricingDiffPercent)}`
+      : "Maintain current price";
+  const marketRangeInsight =
+    competitorPrices.length === 0
+      ? "No competitor data available for selected date"
+      : cheapestCompetitor === highestCompetitor
+      ? `Market price: ${formatCurrency(cheapestCompetitor)}`
+      : `Market price range: ${formatCurrency(cheapestCompetitor)} - ${formatCurrency(highestCompetitor)}`;
+  const priceSpread =
+    highestCompetitor !== null &&
+    highestCompetitor !== undefined &&
+    cheapestCompetitor !== null &&
+    cheapestCompetitor !== undefined
+      ? highestCompetitor - cheapestCompetitor
+      : null;
+  const confidenceTier =
+    competitorPrices.length >= 3 && priceSpread !== null && priceSpread < 800
+      ? "High"
+      : competitorPrices.length >= 2
+      ? "Medium"
+      : "Low";
+  const confidenceLevel = `${confidenceTier} confidence (${competitorPrices.length} competitors)`;
+  const monthlyMarketAverages = Array.from(
+    dashboard.trend.reduce((accumulator, item) => {
+      const key = String(item.dateKey || "").slice(0, 7);
+
+      if (!key) {
+        return accumulator;
+      }
+
+      const marketValue =
+        item.lowest !== null &&
+        item.lowest !== undefined &&
+        item.highest !== null &&
+        item.highest !== undefined
+          ? averageFrom([item.lowest, item.highest])
+          : item.lowest ?? item.highest ?? null;
+
+      if (marketValue === null || marketValue === undefined || Number.isNaN(marketValue)) {
+        return accumulator;
+      }
+
+      const existing = accumulator.get(key) || [];
+      existing.push(marketValue);
+      accumulator.set(key, existing);
+      return accumulator;
+    }, new Map())
+      .entries()
+  )
+    .map(([key, values]) => ({
+      key,
+      average: values.length ? averageFrom(values) : null
+    }))
+    .sort((left, right) => left.key.localeCompare(right.key));
+  const monthComparisonPair = (() => {
+    const mayToJunePairs = [];
+
+    for (let index = 0; index < monthlyMarketAverages.length - 1; index += 1) {
+      const current = monthlyMarketAverages[index];
+      const next = monthlyMarketAverages[index + 1];
+      const sameYear = current.key.slice(0, 4) === next.key.slice(0, 4);
+      const mayToJune = current.key.slice(5) === "05" && next.key.slice(5) === "06";
+
+      if (sameYear && mayToJune) {
+        mayToJunePairs.push([current, next]);
+      }
+    }
+
+    if (mayToJunePairs.length) {
+      return mayToJunePairs[mayToJunePairs.length - 1];
+    }
+
+    if (monthlyMarketAverages.length >= 2) {
+      return [
+        monthlyMarketAverages[monthlyMarketAverages.length - 2],
+        monthlyMarketAverages[monthlyMarketAverages.length - 1]
+      ];
+    }
+
+    return null;
+  })();
+  const trendInsight = (() => {
+    if (!monthComparisonPair) {
+      return "Not enough monthly data to calculate trend insight";
+    }
+
+    const [fromMonth, toMonth] = monthComparisonPair;
+
+    if (
+      fromMonth.average === null ||
+      fromMonth.average === undefined ||
+      Number.isNaN(fromMonth.average) ||
+      fromMonth.average === 0 ||
+      toMonth.average === null ||
+      toMonth.average === undefined ||
+      Number.isNaN(toMonth.average)
+    ) {
+      return "Not enough monthly data to calculate trend insight";
+    }
+
+    const changePercent = ((toMonth.average - fromMonth.average) / fromMonth.average) * 100;
+    const fromLabel = new Intl.DateTimeFormat("en-NZ", {
+      month: "long",
+      year: "numeric"
+    }).format(new Date(`${fromMonth.key}-01T00:00:00`));
+    const toLabel = new Intl.DateTimeFormat("en-NZ", {
+      month: "long",
+      year: "numeric"
+    }).format(new Date(`${toMonth.key}-01T00:00:00`));
+
+    if (changePercent > 0) {
+      return `Prices increased from ${fromLabel} to ${toLabel} by ${formatPercentValue(changePercent)}`;
+    }
+
+    if (changePercent < 0) {
+      return `Prices decreased from ${fromLabel} to ${toLabel} by ${formatPercentValue(changePercent)}`;
+    }
+
+    return `Prices were unchanged from ${fromLabel} to ${toLabel}`;
+  })();
   const latestRun = scraperStatus.latestRun;
+  const cheapestQuoteRow = quoteTableRows.find((row) => !row.isElements) || null;
+  const highestQuoteRow =
+    quoteTableRows.length > 0
+      ? [...quoteTableRows]
+          .filter((row) => !row.isElements)
+          .sort((left, right) => Number(right.price) - Number(left.price))[0] || null
+      : null;
+  const actionTone =
+    recommendedActionInsight.startsWith("Increase")
+      ? "up"
+      : recommendedActionInsight.startsWith("Reduce")
+      ? "down"
+      : "neutral";
+
+  useEffect(() => {
+    setIsUiTransitioning(true);
+    const timer = window.setTimeout(() => setIsUiTransitioning(false), 220);
+    return () => window.clearTimeout(timer);
+  }, [activeTab, selectedDate, selectedDropoff]);
 
   if (loading) {
     return <div style={{ padding: "20px" }}>Loading dashboard...</div>;
@@ -2035,6 +2385,9 @@ function App() {
           <div className="hero-copy">
             <span className="eyebrow">Camper revenue cockpit</span>
             <h1>Modern pricing visibility for every road-trip class.</h1>
+            <p className="hero-copy__subtle">
+              Practical, market-aware guidance for faster pricing decisions.
+            </p>
             <p>
               Track how {activeConfig.label.toLowerCase()} sits against the market,
               protect margin, and adjust rate guidance without losing sight of
@@ -2202,6 +2555,442 @@ function App() {
           </div>
         </section>
 
+        <div className="tabs">
+          <button
+            className={activeTab === "overview" ? "active" : ""}
+            onClick={() => setActiveTab("overview")}
+          >
+            Overview
+          </button>
+          <button
+            className={activeTab === "trend" ? "active" : ""}
+            onClick={() => setActiveTab("trend")}
+          >
+            Trend
+          </button>
+          <button
+            className={activeTab === "competitors" ? "active" : ""}
+            onClick={() => setActiveTab("competitors")}
+          >
+            Competitors
+          </button>
+          <button
+            className={activeTab === "insights" ? "active" : ""}
+            onClick={() => setActiveTab("insights")}
+          >
+            AI Insights
+          </button>
+        </div>
+        <div className="tab-content">
+          {showNoTripData ? (
+            <section className="panel">
+              <p>No data available for selected trip</p>
+            </section>
+          ) : null}
+
+          {competitorPrices.length === 0 ? (
+            <section className="panel">
+              <p>No competitor data available for selected date</p>
+            </section>
+          ) : null}
+
+          {competitorPrices.length < 2 ? (
+            <p className="limited-data-note">
+              Limited competitor data — recommendation based on available inputs
+            </p>
+          ) : null}
+
+          {activeTab === "overview" ? (
+            <>
+            <section className="stats-grid">
+          <StatCard
+            label="Elements Price"
+            value={formatCurrency(exactTripMetrics.totalPrice)}
+            detail={
+              exactTripMetrics.hasExactMatch
+                ? "Your current selling price vs market avg"
+                : "Select pickup and dropoff to see your current selling price"
+            }
+            tone="forest"
+          />
+          <StatCard
+            label="Duration"
+            value={
+              exactTripMetrics.duration !== null &&
+              Number.isFinite(exactTripMetrics.duration) &&
+              exactTripMetrics.duration > 0
+                ? `${exactTripMetrics.duration} days`
+                : "No data"
+            }
+            detail="Calculated from pickup and dropoff dates"
+            tone="sand"
+          />
+          <StatCard
+            label="Daily rate"
+            value={
+              exactTripMetrics.dailyRate === null || exactTripMetrics.dailyRate === undefined
+                ? "No data"
+                : `${formatCurrency(exactTripMetrics.dailyRate)}/day`
+            }
+            detail="Total price divided by trip duration"
+            tone="canyon"
+          />
+          <StatCard
+            label="Recommended rate"
+            value={
+              recommendedPrice === null ? "N/A" : formatCurrency(recommendedPrice)
+            }
+            detail={
+              noCompetitorsCheaperThanElements || competitorPrices.length === 0
+                ? "Based on Elements price + margin"
+                : `Based on ${formatCount(competitorPrices.length)} competitors`
+            }
+            tone="pine"
+          />
+            <StatCard
+              label="Lowest market (competitor) price"
+              value={formatCurrency(cheapestCompetitor)}
+              detail={
+                competitorPrices.length === 0
+                  ? "No competitor data available for selected date"
+                  : noCompetitorsCheaperThanElements
+                  ? "No competitors cheaper than Elements"
+                  : cheapestCompetitorRow
+                  ? `${cheapestCompetitorRow.company} \u2022 ${cheapestCompetitorRow.vehicle}`
+                  : competitorStatusMessage
+              }
+              tone="canyon"
+            />
+          <StatCard
+            label="Market Average"
+            value={formatCurrency(competitorQuoteSnapshot.summary.average)}
+            detail="Average competitor price for the current quote set"
+          />
+          <StatCard
+            label="Highest competitor price"
+            value={formatCurrency(highestCompetitor)}
+            detail={
+              highestCompetitorRow
+                ? `${highestCompetitorRow.company} \u2022 ${highestCompetitorRow.vehicle}`
+                : `Based on ${formatCount(
+                    competitorQuoteSnapshot.summary.competitorCount
+                  )} competitors`
+            }
+            tone="amber"
+          />
+          <StatCard
+            label="Tracked pickups"
+            value={formatCount(dashboard.summary.trackedDates)}
+            detail={`${formatCount(dashboard.summary.observedQuotes)} competitor observations`}
+          />
+            </section>
+
+            <section className="insight-strip">
+              <article className="insight-card">
+                <span className="insight-card__label">Vehicle story</span>
+                <h2>{activeConfig.narrative}</h2>
+                <p>
+                  The dashboard compares Elements pricing against the most relevant
+                  camper alternatives for this class instead of blending the whole market.
+                </p>
+              </article>
+
+              <article className="insight-card">
+                <span className="insight-card__label">Rate signal</span>
+                <h2>{formatCurrency(cheapestCompetitor)} cheapest competitor</h2>
+                <p>
+                  Current guidance lands at {formatCurrency(recommendedPrice)},{" "}
+                  {recommendationSource === "competitor"
+                    ? "anchored to the cheapest observed competitor for this selection."
+                    : recommendationSource === "elements"
+                    ? "using the Elements price fallback for this selection."
+                    : "awaiting a usable baseline for this selection."}
+                </p>
+              </article>
+
+              <article className="insight-card">
+                <span className="insight-card__label">Coverage</span>
+                <h2>{dashboard.latestDateLabel}</h2>
+                <p>
+                  Data is rolling up from pickup-date observations in{" "}
+                  {location || "both depots"}, with the latest viable competitor set used for
+                  the recommendation snapshot.
+                </p>
+              </article>
+            </section>
+
+            <p className="coverage-note">
+              Based on {competitorPrices.length} competitors and {quoteRows.length} quotes
+            </p>
+
+            <section className="chart-grid chart-grid--secondary">
+              <article className="panel">
+                <div className="panel__header">
+                  <div>
+                    <span className="panel__eyebrow">Market spread</span>
+                    <h3>Cheapest competitor stack</h3>
+                  </div>
+                </div>
+                <div className="chart-frame">
+                  {loading ? (
+                    <div className="chart-empty">{"Loading competitor mix\u2026"}</div>
+                  ) : (
+                    <MarketSpreadChart
+                      lowest={competitorQuoteSnapshot.summary.lowest}
+                      highest={competitorQuoteSnapshot.summary.highest}
+                      recommended={recommendedPrice}
+                      elements={elementsPrice}
+                      cheapestRow={competitorQuoteSnapshot.summary.cheapestRow}
+                      highestRow={competitorQuoteSnapshot.summary.highestRow}
+                    />
+                  )}
+                </div>
+              </article>
+            </section>
+            </>
+          ) : null}
+
+          {activeTab === "insights" ? (
+            <section className="panel">
+          <div className="panel__header">
+            <div>
+              <span className="panel__eyebrow">Decision support</span>
+              <h3>AI Insights</h3>
+            </div>
+          </div>
+          <div className="decision-list">
+            <div>
+              <span>Price positioning</span>
+              <strong>{pricingPositioningInsight}</strong>
+            </div>
+            <div>
+              <span>Recommended action</span>
+              <strong className={`action-badge action-badge--${actionTone}`}>
+                {actionTone === "up"
+                  ? `↑ ${recommendedActionInsight}`
+                  : actionTone === "down"
+                  ? `↓ ${recommendedActionInsight}`
+                  : recommendedActionInsight}
+              </strong>
+            </div>
+            <div>
+              <span>Market range</span>
+              <strong>{marketRangeInsight}</strong>
+            </div>
+            <div>
+              <span>Confidence level</span>
+              <strong>{confidenceLevel}</strong>
+              <small>Confidence is based on number of competitors and data consistency</small>
+            </div>
+            <div>
+              <span>Trend insight</span>
+              <strong>{trendInsight}</strong>
+            </div>
+          </div>
+            </section>
+          ) : null}
+
+          {activeTab === "trend" ? (
+            <section className="chart-grid">
+          <article className="panel panel--wide">
+            <div className="panel__header">
+              <div>
+                <span className="panel__eyebrow">Trend view</span>
+                <h3>Price trend vs recommended guidance</h3>
+              </div>
+              <div className="panel__legend">
+                <span className="legend legend--elements">Elements</span>
+                <span className="legend legend--market">Cheapest competitor</span>
+                <span className="legend legend--market">Highest competitor</span>
+                <span className="legend legend--guide">Recommended</span>
+              </div>
+            </div>
+            <div className="chart-frame">
+              {loading ? (
+                <div className="chart-empty">{"Loading market history\u2026"}</div>
+              ) : (
+                <PriceTrendChart
+                  data={dashboard.trend}
+                  selectedPickupDate={selectedDate}
+                />
+              )}
+            </div>
+          </article>
+
+          <article className="panel panel--stack">
+            <div className="panel__header">
+              <div>
+                <span className="panel__eyebrow">Snapshot</span>
+                <h3>Decision notes</h3>
+              </div>
+            </div>
+            <div className="decision-list">
+              <div>
+                <span>Positioning</span>
+                <strong>
+                  {marketGap === null
+                    ? "No matched Elements quote"
+                    : marketGap >= 0
+                      ? "Priced above the market"
+                      : "Priced below the market"}
+                </strong>
+              </div>
+              <div>
+                <span>Margin move</span>
+                <strong>
+                  {dashboard.summary.upliftPercent > 0 ? "+" : ""}
+                  {dashboard.summary.upliftPercent}% pricing buffer
+                </strong>
+              </div>
+              <div>
+                <span>Cheapest signal</span>
+                <strong>
+                  {competitorPrices.length === 0
+                    ? "No competitor data available for selected date"
+                    : noCompetitorsCheaperThanElements
+                    ? "No competitors cheaper than Elements"
+                    : cheapestCompetitorRow
+                    ? `${cheapestCompetitorRow.company} ${cheapestCompetitorRow.vehicle} at ${formatCurrency(cheapestCompetitorRow.price)}`
+                    : competitorStatusMessage}
+                </strong>
+              </div>
+              <div>
+                <span>Highest signal</span>
+                <strong>
+                  {highestCompetitorRow
+                    ? `${highestCompetitorRow.company} ${highestCompetitorRow.vehicle} at ${formatCurrency(highestCompetitorRow.price)}`
+                    : "No competitor data available for selected date"}
+                </strong>
+              </div>
+              <div>
+                <span>Recommendation</span>
+                <strong>
+                  {recommendedPrice === null ? "N/A" : formatCurrency(recommendedPrice)}
+                </strong>
+              </div>
+            </div>
+          </article>
+            </section>
+          ) : null}
+
+          {activeTab === "competitors" ? (
+            <>
+            <section className="chart-grid chart-grid--secondary">
+              <article className="panel">
+            <div className="panel__header">
+              <div>
+                <span className="panel__eyebrow">Operators</span>
+                <h3>Competitor summary</h3>
+              </div>
+            </div>
+            <div className="company-list">
+              {competitorQuoteSnapshot.companyStats.length ? (
+                competitorQuoteSnapshot.companyStats.map((company) => (
+                  <div key={company.company} className="company-list__item">
+                    <div>
+                      <strong>{company.company}</strong>
+                      <p>{company.vehicles}</p>
+                    </div>
+                    <div>
+                      <strong>{formatCurrency(company.average)}</strong>
+                      <p>{company.count} quotes</p>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="company-list__empty">
+                  No competitor summary available for the current filters.
+                </div>
+              )}
+            </div>
+              </article>
+            </section>
+
+            <section className="panel panel--table">
+          <div className="panel__header">
+            <div>
+              <span className="panel__eyebrow">Quote table</span>
+              <h3>Competitor rows</h3>
+            </div>
+          </div>
+
+          <div className="table-shell">
+            <table>
+              <thead>
+                <tr>
+                  <th>Company</th>
+                  <th>Vehicle</th>
+                  <th>Pickup</th>
+                  <th>Dropoff</th>
+                  <th>Duration</th>
+                  <th>Price ↑</th>
+                  <th>Daily Rate</th>
+                </tr>
+              </thead>
+              <tbody>
+                {quoteTableRows.length ? (
+                  quoteTableRows.map((row) => (
+                    <tr
+                      key={`${row.company}-${row.normalizedVehicle}-${row.dateKey}-${row.dropoffDateKey}-${row.price}`}
+                      className={[
+                        row.isElements ? "table-row--elements" : "",
+                        cheapestQuoteRow &&
+                        !row.isElements &&
+                        row.company === cheapestQuoteRow.company &&
+                        row.vehicle === cheapestQuoteRow.vehicle &&
+                        row.price === cheapestQuoteRow.price
+                          ? "table-row--cheapest"
+                          : "",
+                        highestQuoteRow &&
+                        !row.isElements &&
+                        row.company === highestQuoteRow.company &&
+                        row.vehicle === highestQuoteRow.vehicle &&
+                        row.price === highestQuoteRow.price
+                          ? "table-row--highest"
+                          : ""
+                      ]
+                        .filter(Boolean)
+                        .join(" ")}
+                    >
+                      <td>{row.isElements ? "Elements World" : row.company}</td>
+                      <td>{row.vehicle}</td>
+                      <td>{formatDateLabel(row.dateKey, { year: "numeric" })}</td>
+                      <td>{formatDateLabel(row.dropoffDateKey, { year: "numeric" })}</td>
+                      <td>
+                        {row.durationDays !== null && row.durationDays !== undefined
+                          ? `${row.durationDays}`
+                          : "No data"}
+                      </td>
+                      <td>{formatCurrency(row.price)}</td>
+                      <td>
+                        {row.dailyRate !== null && row.dailyRate !== undefined
+                          ? formatCurrency(row.dailyRate)
+                          : "No data"}
+                      </td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan="7" className="table-empty">
+                      No competitor data available for selected date
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+            </section>
+            </>
+          ) : null}
+
+          {isUiTransitioning ? (
+            <div className="ui-loading" aria-live="polite">
+              <span className="ui-loading__spinner" />
+              <span>Updating view...</span>
+            </div>
+          ) : null}
+        </div>
+
         <section className="panel scraper-panel">
           <div className="panel__header">
             <div>
@@ -2299,7 +3088,7 @@ function App() {
               </div>
 
               {scraperStatus.error ? (
-                <p className="scraper-panel__error">{scraperStatus.error}</p>
+                <p className="scraper-panel__hint">Backend not connected yet</p>
               ) : (
                 <p className="scraper-panel__hint">
                   Runs are fully automated in Playwright and write back into the dashboard CSV
@@ -2356,333 +3145,6 @@ function App() {
                 ) : null}
               </div>
             </div>
-          </div>
-        </section>
-
-        <div
-          style={{
-            background: "#eee",
-            padding: "10px",
-            marginTop: "10px"
-          }}
-        >
-          <p>Default Pickup: {selectedDate ? formatDateDMY(selectedDate) : "Not selected"}</p>
-          <p>
-            Default Dropoff:{" "}
-            {selectedDropoff ? formatDateDMY(selectedDropoff) : "Not selected"}
-          </p>
-        </div>
-
-        {showNoTripData ? (
-          <section className="panel">
-            <p>No data available for selected trip</p>
-          </section>
-        ) : null}
-
-        <section className="stats-grid">
-          <StatCard
-            label="Elements Price"
-            value={formatCurrency(exactTripMetrics.totalPrice)}
-            detail={
-              exactTripMetrics.hasExactMatch
-                ? "Your current selling price"
-                : "Select pickup and dropoff to see your current selling price"
-            }
-            tone="forest"
-          />
-          <StatCard
-            label="Duration"
-            value={
-              exactTripMetrics.duration !== null &&
-              Number.isFinite(exactTripMetrics.duration) &&
-              exactTripMetrics.duration > 0
-                ? `${exactTripMetrics.duration} days`
-                : "No data"
-            }
-            detail="Calculated from pickup and dropoff dates"
-            tone="sand"
-          />
-          <StatCard
-            label="Daily rate"
-            value={
-              exactTripMetrics.dailyRate === null || exactTripMetrics.dailyRate === undefined
-                ? "No data"
-                : `${formatCurrency(exactTripMetrics.dailyRate)}/day`
-            }
-            detail="Total trip price divided by duration"
-            tone="canyon"
-          />
-          <StatCard
-            label="Recommended rate"
-            value={
-              recommendedPrice === null ? "N/A" : formatCurrency(recommendedPrice)
-            }
-            detail={recommendationDetail}
-          />
-            <StatCard
-              label="Lowest competitor price"
-              value={formatCurrency(competitorQuoteSnapshot.summary.lowest)}
-              detail={
-                cheapestCompetitor
-                  ? `${cheapestCompetitor.company} \u2022 ${cheapestCompetitor.vehicle}`
-                  : elementsPrice !== null &&
-                    elementsPrice !== undefined &&
-                    !Number.isNaN(elementsPrice)
-                  ? "No cheaper competitors"
-                  : "No competitor rows for this filter set"
-              }
-              tone="canyon"
-            />
-          <StatCard
-            label="Market Average"
-            value={formatCurrency(competitorQuoteSnapshot.summary.average)}
-            detail="Average competitor price for the current quote set"
-          />
-          <StatCard
-            label="Highest competitor price"
-            value={formatCurrency(competitorQuoteSnapshot.summary.highest)}
-            detail={
-              highestCompetitor
-                ? `${highestCompetitor.company} \u2022 ${highestCompetitor.vehicle}`
-                : `${formatCount(
-                    competitorQuoteSnapshot.summary.competitorCount
-                  )} quotes in current view`
-            }
-          />
-          <StatCard
-            label="Tracked pickups"
-            value={formatCount(dashboard.summary.trackedDates)}
-            detail={`${formatCount(dashboard.summary.observedQuotes)} competitor observations`}
-          />
-        </section>
-
-        <section className="insight-strip">
-          <article className="insight-card">
-            <span className="insight-card__label">Vehicle story</span>
-            <h2>{activeConfig.narrative}</h2>
-            <p>
-              The dashboard compares Elements pricing against the most relevant
-              camper alternatives for this class instead of blending the whole market.
-            </p>
-          </article>
-
-          <article className="insight-card">
-            <span className="insight-card__label">Rate signal</span>
-            <h2>{formatCurrency(dashboard.summary.lowest)} cheapest competitor</h2>
-            <p>
-              Current guidance lands at {formatCurrency(recommendedPrice)},{" "}
-              {recommendationSource === "competitor"
-                ? "anchored to the cheapest observed competitor for this selection."
-                : recommendationSource === "elements"
-                ? "using the Elements price fallback for this selection."
-                : "awaiting a usable baseline for this selection."}
-            </p>
-          </article>
-
-          <article className="insight-card">
-            <span className="insight-card__label">Coverage</span>
-            <h2>{dashboard.latestDateLabel}</h2>
-            <p>
-              Data is rolling up from pickup-date observations in{" "}
-              {location || "both depots"}, with the latest viable competitor set used for
-              the recommendation snapshot.
-            </p>
-          </article>
-        </section>
-
-        <section className="chart-grid">
-          <article className="panel panel--wide">
-            <div className="panel__header">
-              <div>
-                <span className="panel__eyebrow">Trend view</span>
-                <h3>Price trend vs recommended guidance</h3>
-              </div>
-              <div className="panel__legend">
-                <span className="legend legend--elements">Elements</span>
-                <span className="legend legend--market">Cheapest competitor</span>
-                <span className="legend legend--market">Highest competitor</span>
-                <span className="legend legend--guide">Recommended</span>
-              </div>
-            </div>
-            <div className="chart-frame">
-              {loading ? (
-                <div className="chart-empty">{"Loading market history\u2026"}</div>
-              ) : (
-                <PriceTrendChart data={dashboard.trend} />
-              )}
-            </div>
-          </article>
-
-          <article className="panel panel--stack">
-            <div className="panel__header">
-              <div>
-                <span className="panel__eyebrow">Snapshot</span>
-                <h3>Decision notes</h3>
-              </div>
-            </div>
-            <div className="decision-list">
-              <div>
-                <span>Positioning</span>
-                <strong>
-                  {marketGap === null
-                    ? "No matched Elements quote"
-                    : marketGap >= 0
-                      ? "Priced above the market"
-                      : "Priced below the market"}
-                </strong>
-              </div>
-              <div>
-                <span>Margin move</span>
-                <strong>
-                  {dashboard.summary.upliftPercent > 0 ? "+" : ""}
-                  {dashboard.summary.upliftPercent}% pricing buffer
-                </strong>
-              </div>
-              <div>
-                <span>Cheapest signal</span>
-                <strong>
-                  {cheapestCompetitor
-                    ? `${cheapestCompetitor.company} ${cheapestCompetitor.vehicle} at ${formatCurrency(cheapestCompetitor.price)}`
-                    : elementsPrice !== null &&
-                      elementsPrice !== undefined &&
-                      !Number.isNaN(elementsPrice)
-                    ? "No cheaper competitors"
-                    : "Awaiting competitor data"}
-                </strong>
-              </div>
-              <div>
-                <span>Highest signal</span>
-                <strong>
-                  {highestCompetitor
-                    ? `${highestCompetitor.company} ${highestCompetitor.vehicle} at ${formatCurrency(highestCompetitor.price)}`
-                    : "Awaiting competitor data"}
-                </strong>
-              </div>
-              <div>
-                <span>Recommendation</span>
-                <strong>
-                  {recommendedPrice === null ? "N/A" : formatCurrency(recommendedPrice)}
-                </strong>
-              </div>
-            </div>
-          </article>
-        </section>
-
-        <section className="chart-grid chart-grid--secondary">
-          <article className="panel">
-            <div className="panel__header">
-              <div>
-                <span className="panel__eyebrow">Market spread</span>
-                <h3>Cheapest competitor stack</h3>
-              </div>
-            </div>
-            <div className="chart-frame">
-              {loading ? (
-                <div className="chart-empty">{"Loading competitor mix\u2026"}</div>
-              ) : (
-                <MarketSpreadChart
-                  lowest={competitorQuoteSnapshot.summary.lowest}
-                  highest={competitorQuoteSnapshot.summary.highest}
-                  recommended={recommendedPrice}
-                  elements={elementsPrice}
-                  cheapestRow={competitorQuoteSnapshot.summary.cheapestRow}
-                  highestRow={competitorQuoteSnapshot.summary.highestRow}
-                />
-              )}
-            </div>
-          </article>
-
-          <article className="panel">
-            <div className="panel__header">
-              <div>
-                <span className="panel__eyebrow">Operators</span>
-                <h3>Competitor summary</h3>
-              </div>
-            </div>
-            <div className="company-list">
-              {competitorQuoteSnapshot.companyStats.length ? (
-                competitorQuoteSnapshot.companyStats.map((company) => (
-                  <div key={company.company} className="company-list__item">
-                    <div>
-                      <strong>{company.company}</strong>
-                      <p>{company.vehicles}</p>
-                    </div>
-                    <div>
-                      <strong>{formatCurrency(company.average)}</strong>
-                      <p>{company.count} quotes</p>
-                    </div>
-                  </div>
-                ))
-              ) : (
-                <div className="company-list__empty">
-                  No competitor summary available for the current filters.
-                </div>
-              )}
-            </div>
-          </article>
-        </section>
-
-        <section className="panel panel--table">
-          <div className="panel__header">
-            <div>
-              <span className="panel__eyebrow">Quote table</span>
-              <h3>Competitor rows</h3>
-            </div>
-          </div>
-
-          <div className="table-shell">
-            <table>
-              <thead>
-                <tr>
-                  <th>Company</th>
-                  <th>Vehicle</th>
-                  <th>Pickup</th>
-                  <th>Dropoff</th>
-                  <th>Duration</th>
-                  <th>Price</th>
-                  <th>Daily Rate</th>
-                </tr>
-              </thead>
-              <tbody>
-                {quoteTableRows.length ? (
-                  quoteTableRows.map((row) => (
-                    <tr
-                      key={`${row.company}-${row.normalizedVehicle}-${row.dateKey}-${row.dropoffDateKey}-${row.price}`}
-                      style={
-                        row.isElements
-                          ? {
-                              fontWeight: 700,
-                              backgroundColor: "#f4efe2"
-                            }
-                          : undefined
-                      }
-                    >
-                      <td>{row.isElements ? "Elements World" : row.company}</td>
-                      <td>{row.vehicle}</td>
-                      <td>{formatDateLabel(row.dateKey, { year: "numeric" })}</td>
-                      <td>{formatDateLabel(row.dropoffDateKey, { year: "numeric" })}</td>
-                      <td>
-                        {row.durationDays !== null && row.durationDays !== undefined
-                          ? `${row.durationDays}`
-                          : "No data"}
-                      </td>
-                      <td>{formatCurrency(row.price)}</td>
-                      <td>
-                        {row.dailyRate !== null && row.dailyRate !== undefined
-                          ? formatCurrency(row.dailyRate)
-                          : "No data"}
-                      </td>
-                    </tr>
-                  ))
-                ) : (
-                  <tr>
-                    <td colSpan="7" className="table-empty">
-                      No competitor quotes match the current selection.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
           </div>
         </section>
       </main>
