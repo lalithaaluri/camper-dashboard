@@ -5,10 +5,12 @@ import { z } from "zod";
 import { DEPOTS } from "./config.js";
 import { runAutomatedScrape } from "./scraper.js";
 import {
+  deleteBadTrekScrapeBatch,
   ensureStorage,
+  getPricingDataRowCount,
+  insertPricingRows,
   loadDataset,
   loadRunHistory,
-  mergeRows,
   paths,
   summarizeDataset,
   upsertRun,
@@ -20,11 +22,17 @@ import type { DepotCode, RunSummary, ScrapeRequest } from "./types.js";
 const app = express();
 const port = Number(process.env.PORT || 4301);
 let activeRunId: string | null = null;
+const AUTO_RUN = false;
+
+const shouldWriteCsvBackup = () => {
+  const value = (process.env.SCRAPER_WRITE_CSV_BACKUP ?? "").trim().toLowerCase();
+  return value === "1" || value === "true" || value === "yes";
+};
 
 const scrapeRequestSchema = z.object({
   pickupDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   locations: z.array(z.enum(["auckland", "christchurch"])).min(1),
-  maxTripDays: z.number().int().min(1).max(31).default(30),
+  maxTripDays: z.number().int().min(1).max(31).default(3),
   headless: z.boolean().default(true)
 });
 
@@ -41,6 +49,9 @@ const createRunSummary = (request: ScrapeRequest): RunSummary => {
     maxTripDays: request.maxTripDays,
     headless: request.headless,
     rowsCaptured: 0,
+    rowsProcessed: 0,
+    rowsInserted: 0,
+    totalRows: 0,
     datesVisited: 0
   };
 };
@@ -54,7 +65,7 @@ const normalizeRequest = (body: unknown): ScrapeRequest => {
       source !== null &&
       "maxTripDays" in source
         ? Number(source.maxTripDays)
-        : 30
+        : 3
   });
 
   return parsed;
@@ -68,6 +79,7 @@ app.use("/data", express.static(paths.dataDir));
 app.get("/api/health", async (_request, response) => {
   const dataset = summarizeDataset(await loadDataset());
   const runs = await loadRunHistory();
+  const latestRun = runs[0] ?? null;
 
   response.json({
     ok: true,
@@ -76,7 +88,8 @@ app.get("/api/health", async (_request, response) => {
       code: code as DepotCode,
       label: details.label
     })),
-    latestRun: runs[0] ?? null,
+    latestRun,
+    latestRunError: latestRun?.error ?? null,
     dataset
   });
 });
@@ -118,21 +131,40 @@ app.post("/api/runs", async (request, response) => {
     await upsertRun(runningRun);
 
     try {
-      const result = await runAutomatedScrape(payload, run.id);
-      const existingRows = await loadDataset();
-      const mergedRows = mergeRows(existingRows, result.rows);
-      await writeDataset(mergedRows);
+      const result = await runAutomatedScrape(payload, run.id, async (progress) => {
+        const totalRowsSoFar = await getPricingDataRowCount();
+        await upsertRun({
+          ...runningRun,
+          status: "running",
+          updatedAt: new Date().toISOString(),
+          rowsCaptured: progress.rowsProcessed,
+          rowsProcessed: progress.rowsProcessed,
+          rowsInserted: 0,
+          totalRows: totalRowsSoFar,
+          datesVisited: progress.datesVisited
+        });
+      });
+      const rowsProcessed = result.rowsProcessed;
+      const rowsInserted = await insertPricingRows(result.rows);
+      const totalRows = await getPricingDataRowCount();
+      if (shouldWriteCsvBackup()) {
+        await writeDataset(await loadDataset());
+      }
       const artifacts = await writeRunArtifact(run.id, result.rows, result.warnings);
 
       await upsertRun({
         ...runningRun,
         status: "completed",
         updatedAt: new Date().toISOString(),
-        rowsCaptured: result.rows.length,
+        rowsCaptured: rowsProcessed,
+        rowsProcessed,
+        rowsInserted,
+        totalRows,
         datesVisited: result.datesVisited,
         artifacts
       });
     } catch (error) {
+      console.error("SCRAPER ERROR:", error);
       await upsertRun({
         ...runningRun,
         status: "failed",
@@ -147,10 +179,41 @@ app.post("/api/runs", async (request, response) => {
   response.status(202).json(run);
 });
 
+app.post("/api/fix-trek-june-auckland", async (req, res) => {
+  try {
+    // Step 1: remove incorrect Trek data from that scrape batch
+    const deleted = await deleteBadTrekScrapeBatch();
+
+    // Step 2: run scraper again for June Auckland
+    const result = await runAutomatedScrape(
+      {
+        pickupDate: "2026-06-01",
+        locations: ["auckland"],
+        maxTripDays: 3,
+        headless: true
+      },
+      `fix-trek-june-auckland-${Date.now()}`
+    );
+
+    // Step 3: insert corrected rows
+    const inserted = await insertPricingRows(result.rows);
+
+    res.json({
+      success: true,
+      deletedRows: deleted,
+      insertedRows: inserted
+    });
+  } catch (err) {
+    console.error("Fix failed", err);
+    res.status(500).json({ error: "Fix failed" });
+  }
+});
+
 ensureStorage()
   .then(() => {
     app.listen(port, () => {
       console.log(`scraper-service listening on http://localhost:${port}`);
+      void AUTO_RUN;
     });
   })
   .catch((error) => {

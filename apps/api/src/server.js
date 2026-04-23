@@ -50,69 +50,53 @@ app.get("/api/latest-scrape-date", (req, res) => {
   }
 });
 
-app.get("/api/prices", async (req, res) => {
+app.get("/api/prices", (req, res) => {
   try {
     console.log("API HIT: /api/prices");
     const db = getDb();
-    const vehicle =
-      typeof req.query.vehicle === "string" && req.query.vehicle.trim() !== ""
-        ? req.query.vehicle.trim()
-        : null;
-    const location =
-      typeof req.query.location === "string" && req.query.location.trim() !== ""
-        ? req.query.location.trim()
-        : null;
-    const pickupDate =
-      typeof req.query.pickup_date === "string" && req.query.pickup_date.trim() !== ""
-        ? req.query.pickup_date.trim()
-        : null;
-    const dropoffDate =
-      typeof req.query.dropoff_date === "string" && req.query.dropoff_date.trim() !== ""
-        ? req.query.dropoff_date.trim()
-        : null;
-
-    const query = `
-      SELECT
-        pickup_date,
-        dropoff_date,
-        location,
-        company,
-        vehicle,
-        price,
-        type,
-        scrape_date
-      FROM (
-        SELECT
-          *,
-          ROW_NUMBER() OVER (
-            PARTITION BY pickup_date, dropoff_date, vehicle, location, company
-            ORDER BY scrape_date DESC
-          ) AS rn
-        FROM pricing_data
-        WHERE 1=1
-          AND (? IS NULL OR vehicle = ?)
-          AND (? IS NULL OR location = ?)
-          AND (? IS NULL OR pickup_date = ?)
-          AND (? IS NULL OR dropoff_date = ?)
-      ) t
-      WHERE rn = 1
-      ;
-    `;
-
-    const rows = db.prepare(query).all(
-      vehicle,
-      vehicle,
-      location,
-      location,
-      pickupDate,
-      pickupDate,
-      dropoffDate,
-      dropoffDate
-    );
+    const rows = db.prepare("SELECT * FROM pricing_data;").all();
     res.json(rows);
   } catch (err) {
-    console.error("PRICES ERROR:", err);
-    res.status(500).json({ error: err.message });
+    console.error("API ERROR:", err);
+    res.status(500).json({ error: "Failed to fetch prices" });
+  }
+});
+
+app.get("/api/prices/latest", (req, res) => {
+  try {
+    console.log("API HIT: /api/prices/latest");
+    const db = getDb();
+    const rows = db
+      .prepare(
+        `
+          SELECT p.*
+          FROM pricing_data p
+          JOIN (
+            SELECT
+              pickup_date,
+              dropoff_date,
+              location,
+              company,
+              vehicle,
+              type,
+              MAX(scrape_date) AS max_scrape_date
+            FROM pricing_data
+            GROUP BY pickup_date, dropoff_date, location, company, vehicle, type
+          ) latest
+            ON p.pickup_date = latest.pickup_date
+           AND p.dropoff_date = latest.dropoff_date
+           AND p.location = latest.location
+           AND p.company = latest.company
+           AND p.vehicle = latest.vehicle
+           AND p.type = latest.type
+           AND p.scrape_date = latest.max_scrape_date
+        `
+      )
+      .all();
+    res.json(rows);
+  } catch (err) {
+    console.error("LATEST PRICES ERROR:", err);
+    res.status(500).json({ error: "Failed to fetch latest prices" });
   }
 });
 

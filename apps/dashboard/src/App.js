@@ -112,6 +112,10 @@ const initialScraperStatus = {
 const normalize = (value) =>
   String(value || "").toLowerCase().replace(/\s+/g, "");
 
+function normalizeVehicleKey(v) {
+  return String(v || "").toLowerCase().replace(/\s+/g, "");
+}
+
 function normalizeVehicle(v) {
   if (!v) return "";
   v = String(v).toLowerCase();
@@ -144,6 +148,8 @@ function normalizeVehicle(v) {
 
 const normalizeVehicleMatch = (value) => normalizeVehicle(value);
 const normalizeVehicleName = (name) => normalizeVehicle(name);
+const isValidCompetitorPriceRow = (row) =>
+  Number.isFinite(Number(row?.price)) && Number(row.price) > 10;
 
 function formatDateDMY(dateStr) {
   if (!dateStr) return "";
@@ -344,6 +350,8 @@ export const buildCompetitorQuoteSnapshot = ({
 
     const normalizedVehicle = normalizeVehicle(row.vehicle);
     const normalizedSelectedVehicle = normalizeVehicle(selectedVehicle);
+    const rowVehicleKey = normalizeVehicleKey(row.vehicle);
+    const selectedVehicleKey = normalizeVehicleKey(selectedVehicle);
     const competitorLookup = normalize(`${row.company} ${normalizedVehicle}`);
     const competitorVehicleOnlyLookup = normalize(normalizedVehicle);
     const isMappedCompetitor = competitors.some(
@@ -353,7 +361,7 @@ export const buildCompetitorQuoteSnapshot = ({
     );
     const matchesSelectedVehicle =
       !normalizedSelectedVehicle ||
-      normalize(normalizedVehicle) === normalize(normalizedSelectedVehicle) ||
+      rowVehicleKey === selectedVehicleKey ||
       isMappedCompetitor;
 
     if (!matchesSelectedVehicle) {
@@ -362,7 +370,7 @@ export const buildCompetitorQuoteSnapshot = ({
 
     if (
       competitors.length &&
-      normalize(normalizedVehicle) !== normalize(normalizedSelectedVehicle) &&
+      rowVehicleKey !== selectedVehicleKey &&
       !isMappedCompetitor
     ) {
       return false;
@@ -401,7 +409,8 @@ export const buildCompetitorQuoteSnapshot = ({
           compareScrapeDates(row.scrapeDate, latestScrapeDate) === 0
       )
     : filteredRows;
-  const quoteRows = dedupeQuoteRows(latestRows)
+  const validCompetitorRows = latestRows.filter(isValidCompetitorPriceRow);
+  const quoteRows = dedupeQuoteRows(validCompetitorRows)
     .map((row) => {
       const durationDays = getRowDurationDays(row);
       const dailyRate =
@@ -503,7 +512,7 @@ export const buildQuoteTableRows = ({
 
 const collectBucketMetrics = (bucket) => {
   const elementsRows = bucket?.elementsRows || [];
-  const competitorRows = bucket?.competitorCandidates || [];
+  const competitorRows = (bucket?.competitorCandidates || []).filter(isValidCompetitorPriceRow);
   const competitorPrices = competitorRows.map((row) => row.price);
   const elementsPrices = elementsRows.map((row) => row.price);
   const cheapestRow = competitorRows.length
@@ -581,12 +590,13 @@ const groupRelevantRows = (rows, config, selectedVehicle) => {
   rows.forEach((row) => {
     const normalizedSelectedVehicle = normalizeVehicle(selectedVehicle);
     const normalizedRowVehicle = normalizeVehicle(row.vehicle);
+    const selectedVehicleKey = normalizeVehicleKey(selectedVehicle);
+    const rowVehicleKey = normalizeVehicleKey(row.vehicle);
     const competitorLookup = normalize(`${row.company} ${normalizedRowVehicle}`);
     const competitorVehicleOnlyLookup = normalize(normalizedRowVehicle);
     const isElementsRow =
       normalize(row.company) === "elementsworld" &&
-      (!normalizedSelectedVehicle ||
-        normalize(normalizedRowVehicle) === normalize(normalizedSelectedVehicle));
+      (!normalizedSelectedVehicle || rowVehicleKey === selectedVehicleKey);
     const isCompetitorRow =
       normalize(row.company) !== "elementsworld" &&
       config.competitorVehicles.some(
@@ -625,9 +635,7 @@ const groupRelevantRows = (rows, config, selectedVehicle) => {
 };
 
 function isSameVehicle(rowVehicle, selectedVehicle) {
-  const normalizedRowVehicle = normalizeVehicleMatch(rowVehicle);
-  const normalizedSelectedVehicle = normalizeVehicleMatch(selectedVehicle);
-  return normalize(normalizedRowVehicle) === normalize(normalizedSelectedVehicle);
+  return normalizeVehicleKey(rowVehicle) === normalizeVehicleKey(selectedVehicle);
 }
 
 function findNearestElementsPrice(grouped, targetDate, selectedVehicle) {
@@ -685,7 +693,7 @@ export const filterExactTripRows = ({
       (!selectedPickup || row.dateKey === selectedPickup) &&
       (!selectedDropoff || row.dropoffDateKey === selectedDropoff) &&
       (!selectedVehicle ||
-        normalizeVehicle(row.vehicle) === normalizeVehicle(selectedVehicle)) &&
+        normalizeVehicleKey(row.vehicle) === normalizeVehicleKey(selectedVehicle)) &&
       (!selectedLocation || row.location === selectedLocation) &&
       row.company === "elementsworld"
   );
@@ -1757,8 +1765,8 @@ function App() {
     setLoadError("");
     const loadData = async () => {
       try {
-        const pricesUrl = `${PRICING_API_BASE}/api/prices`;
-        const trendsUrl = `${PRICING_API_BASE}/api/trends`;
+        const pricesUrl = `${PRICING_API_BASE}/api/prices/latest`;
+        const trendsUrl = `${PRICING_API_BASE}/api/prices`;
 
         const [pricesResponse, trendsResponse] = await Promise.all([
           fetch(pricesUrl, { signal: controller.signal }),
@@ -1776,6 +1784,7 @@ function App() {
           pricesResponse.json(),
           trendsResponse.json()
         ]);
+        console.log("API DATA:", Array.isArray(pricesApiRows) ? pricesApiRows.length : 0);
 
         if (cancelled) {
           return;
@@ -1913,6 +1922,8 @@ function App() {
 
       relevantRows.push(row);
     });
+    console.log("FILTERED DATA:", relevantRows.length);
+    console.log("Filters:", vehicle, location, [selectedDate, selectedDropoff]);
 
     setDashboard(
       buildDashboardFromRows({
@@ -1946,6 +1957,8 @@ function App() {
 
       relevantTrendRows.push(row);
     });
+    console.log("FILTERED DATA:", relevantTrendRows.length);
+    console.log("Filters:", vehicle, location, [selectedDate, selectedDropoff]);
 
     setTrendDashboard(
       buildDashboardFromRows({
@@ -1965,7 +1978,7 @@ function App() {
           (row) =>
             row.dateKey === pickupDate &&
             row.company === "elementsworld" &&
-            normalizeVehicle(row.vehicle) === normalizeVehicle(vehicle)
+            normalizeVehicleKey(row.vehicle) === normalizeVehicleKey(vehicle)
         )
         .map((row) => row.dropoffDateKey)
         .filter(Boolean)
@@ -2008,7 +2021,7 @@ function App() {
       (row) =>
         row.dateKey === pickupDate &&
         row.company === "elementsworld" &&
-        normalizeVehicle(row.vehicle) === normalizeVehicle(vehicle)
+        normalizeVehicleKey(row.vehicle) === normalizeVehicleKey(vehicle)
     );
 
     if (
@@ -2049,10 +2062,11 @@ function App() {
 
   const activeConfig = vehicleConfigs[vehicle] || vehicleConfigs["trek budget"];
   const elementsPrice = exactTripMetrics.totalPrice;
-  const competitorRows = competitorQuoteSnapshot.rows;
-  const competitorPrices = competitorRows
+  const validCompetitorRows = competitorQuoteSnapshot.rows.filter(isValidCompetitorPriceRow);
+  const competitorRows = validCompetitorRows;
+  const competitorPrices = validCompetitorRows
     .map((row) => Number(row.price))
-    .filter((price) => !Number.isNaN(price));
+    .filter((price) => Number.isFinite(price) && price > 10);
   const cheapestCompetitor =
     competitorPrices.length > 0 ? Math.min(...competitorPrices) : null;
   const highestCompetitor =
@@ -3062,16 +3076,18 @@ function App() {
                 <p className="scraper-panel__hint">Backend not connected yet</p>
               ) : (
                 <p className="scraper-panel__hint">
-                  Runs are fully automated in Playwright and write back into the dashboard CSV
-                  once complete.
+                  Runs are fully automated in Playwright and write into the shared pricing
+                  database, with dashboard views loaded through the pricing API.
                 </p>
               )}
             </div>
 
             <div className="scraper-panel__summary">
               <div className="scraper-stat">
-                <span>Dataset rows</span>
-                <strong>{formatCount(scraperStatus.dataset.rowCount || 0)}</strong>
+                <span>Total dataset rows</span>
+                <strong>
+                  {formatCount(latestRun?.totalRows || scraperStatus.dataset.rowCount || 0)}
+                </strong>
               </div>
               <div className="scraper-stat">
                 <span>Latest pickup in dataset</span>
@@ -3094,16 +3110,20 @@ function App() {
                 </strong>
               </div>
               <div className="scraper-stat">
-                <span>Captured rows last run</span>
-                <strong>{formatCount(latestRun?.rowsCaptured || 0)}</strong>
+                <span>Rows processed this run</span>
+                <strong>{formatCount(latestRun?.rowsProcessed || latestRun?.rowsCaptured || 0)}</strong>
+              </div>
+              <div className="scraper-stat">
+                <span>Rows inserted this run</span>
+                <strong>{formatCount(latestRun?.rowsInserted || 0)}</strong>
               </div>
 
               <div className="scraper-panel__links">
                 <a href={`${SCRAPER_API_BASE}/api/health`} target="_blank" rel="noreferrer">
                   Open scraper health
                 </a>
-                <a href={`${SCRAPER_API_BASE}/data/dataset_FINAL_TrekSAFE.csv`} target="_blank" rel="noreferrer">
-                  Open generated dataset
+                <a href={`${PRICING_API_BASE}/api/prices`} target="_blank" rel="noreferrer">
+                  View latest data
                 </a>
                 {latestRun?.artifacts?.csvPath ? (
                   <a

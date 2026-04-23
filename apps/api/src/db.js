@@ -29,6 +29,7 @@ const getDb = () => {
   }
 
   fs.mkdirSync(dataDir, { recursive: true });
+  console.log("API DB PATH:", dbPath);
   db = new Database(dbPath);
   initializeSchema(db);
   return db;

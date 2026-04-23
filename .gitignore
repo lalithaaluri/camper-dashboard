@@ -31,3 +31,10 @@ yarn-debug.log*
 yarn-error.log*
 .codex-devserver.out.log
 .codex-devserver.err.log
+
+# runtime files
+node_modules/
+*.db
+*.log
+*.err.log
+.env

@@ -137,9 +137,21 @@ const vehicleRules: VehicleRule[] = [
   },
   {
     company: "elementsworld",
-    vehicle: "trekcampers",
+    vehicle: "trek large",
     type: "elements",
-    matchAll: ["trek"]
+    matchAll: ["trek", "large"]
+  },
+  {
+    company: "elementsworld",
+    vehicle: "trek medium",
+    type: "elements",
+    matchAll: ["trek", "medium"]
+  },
+  {
+    company: "elementsworld",
+    vehicle: "trek budget",
+    type: "elements",
+    matchAll: ["trek", "budget"]
   }
 ];
 

@@ -12,6 +12,10 @@ import App, {
   selectLatestRowsBySnapshot
 } from "./App";
 
+jest.mock("@visx/responsive", () => ({
+  ParentSize: ({ children }) => children({ width: 960, height: 400 })
+}));
+
 jest.mock("papaparse", () => ({
   parse: jest.fn((_, options) => {
     options.complete({
@@ -98,6 +102,83 @@ jest.mock("papaparse", () => ({
   })
 }));
 
+beforeEach(() => {
+  global.fetch = jest.fn(async (input) => {
+    const url = String(input);
+
+    if (url.includes("/api/prices/latest")) {
+      return {
+        ok: true,
+        json: async () => [
+          {
+            pickup_date: "2026-04-01",
+            dropoff_date: "2026-04-02",
+            location: "auckland",
+            company: "elementsworld",
+            vehicle: "trek large",
+            price: 320,
+            scrape_date: "2026-04-18",
+            type: "elements"
+          },
+          {
+            pickup_date: "2026-04-01",
+            dropoff_date: "2026-04-02",
+            location: "auckland",
+            company: "campervanvillage",
+            vehicle: "aventus2",
+            price: 295,
+            scrape_date: "2026-04-18",
+            type: "competitor"
+          }
+        ]
+      };
+    }
+
+    if (url.includes("/api/prices")) {
+      return {
+        ok: true,
+        json: async () => [
+          {
+            pickup_date: "2026-04-01",
+            dropoff_date: "2026-04-02",
+            location: "auckland",
+            company: "campervanvillage",
+            vehicle: "aventus2",
+            price: 295,
+            scrape_date: "2026-04-18",
+            type: "competitor"
+          }
+        ]
+      };
+    }
+
+    if (url.includes("/api/health")) {
+      return {
+        ok: true,
+        json: async () => ({
+          ok: true,
+          activeRunId: null,
+          latestRun: null,
+          dataset: {
+            rowCount: 2,
+            latestPickupDate: "2026-04-01",
+            latestScrapeDate: "2026-04-18"
+          }
+        })
+      };
+    }
+
+    return {
+      ok: true,
+      json: async () => ({})
+    };
+  });
+});
+
+afterEach(() => {
+  jest.restoreAllMocks();
+});
+
 test("renders camper revenue dashboard", async () => {
   render(<App />);
 
@@ -105,7 +186,19 @@ test("renders camper revenue dashboard", async () => {
     await screen.findByText(/modern pricing visibility for every road-trip class/i)
   ).toBeInTheDocument();
   expect(screen.getByText(/recommended rate/i)).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: /view latest data/i })).toHaveAttribute(
+    "href",
+    "http://localhost:4302/api/prices"
+  );
   expect(screen.queryByText(/latest pickup date/i)).not.toBeInTheDocument();
+  expect(global.fetch).toHaveBeenCalledWith(
+    "http://localhost:4302/api/prices/latest",
+    expect.objectContaining({ signal: expect.any(AbortSignal) })
+  );
+  expect(global.fetch).toHaveBeenCalledWith(
+    "http://localhost:4302/api/prices",
+    expect.objectContaining({ signal: expect.any(AbortSignal) })
+  );
 });
 
 test("selectDefaultElementsRow prefers the non-Trek Elements row with the strongest competitor coverage", () => {
@@ -257,14 +350,12 @@ test("buildExactTripMetrics returns total price, duration, and daily rate only f
 });
 
 test("getMappedCompetitors returns the normalized competitor list for the selected vehicle", () => {
-  expect(getMappedCompetitors("trekcampers")).toEqual([
-    "stationwagen",
-    "sleeper",
-    "aventus2"
+  expect(getMappedCompetitors("trek large")).toEqual([
+    "campervanvillageaventus2"
   ]);
 });
 
-test("buildCompetitorQuoteSnapshot keeps only exact-match competitor rows from the latest scrape and removes duplicates", () => {
+test("buildCompetitorQuoteSnapshot keeps only mapped competitor rows from the latest scrape and removes duplicates", () => {
   const rows = [
     {
       dateKey: "2026-05-27",
@@ -301,17 +392,6 @@ test("buildCompetitorQuoteSnapshot keeps only exact-match competitor rows from t
     },
     {
       dateKey: "2026-05-27",
-      dropoffDateKey: "2026-05-31",
-      location: "auckland",
-      company: "happycampers",
-      vehicle: "Sleeper",
-      type: "competitor",
-      price: 300,
-      tripDays: 4,
-      scrapeDate: new Date("2026-05-21")
-    },
-    {
-      dateKey: "2026-05-27",
       dropoffDateKey: "2026-06-01",
       location: "auckland",
       company: "happycampers",
@@ -337,7 +417,7 @@ test("buildCompetitorQuoteSnapshot keeps only exact-match competitor rows from t
       dropoffDateKey: "2026-05-31",
       location: "auckland",
       company: "elementsworld",
-      vehicle: "trekcampers",
+      vehicle: "trek large",
       type: "elements",
       price: 500,
       tripDays: 4,
@@ -349,12 +429,12 @@ test("buildCompetitorQuoteSnapshot keeps only exact-match competitor rows from t
     rows,
     selectedPickup: "2026-05-27",
     selectedDropoff: "2026-05-31",
-    selectedVehicle: "trekcampers",
+    selectedVehicle: "trek large",
     selectedLocation: "auckland"
   });
 
-  expect(snapshot.rows).toHaveLength(2);
-  expect(snapshot.rows.map((row) => row.price)).toEqual([256, 300]);
+  expect(snapshot.rows).toHaveLength(1);
+  expect(snapshot.rows.map((row) => row.price)).toEqual([256]);
   expect(snapshot.rows[0]).toMatchObject({
     company: "campervanvillage",
     vehicle: "aventus2",
@@ -363,9 +443,9 @@ test("buildCompetitorQuoteSnapshot keeps only exact-match competitor rows from t
   });
   expect(snapshot.summary).toMatchObject({
     lowest: 256,
-    highest: 300,
-    average: 278,
-    competitorCount: 2
+    highest: 256,
+    average: 256,
+    competitorCount: 1
   });
 });
 
@@ -594,11 +674,11 @@ test("buildDashboardFromRows uses the latest pickup date by default and filters 
     elements: 330,
     recommended: 315
   });
-  expect(defaultDashboard.latestDateLabel).toMatch(/2 Apr 2026/i);
+  expect(defaultDashboard.latestDateLabel).toMatch(/02\/04\/2026/i);
   expect(filteredDashboard.latestRows.map((row) => row.dateKey)).toEqual([
     "2026-04-02"
   ]);
-  expect(filteredDashboard.latestDateLabel).toMatch(/2 Apr 2026/i);
+  expect(filteredDashboard.latestDateLabel).toMatch(/02\/04\/2026/i);
 });
 
 test("buildDashboardFromRows falls back to available rows when latest date has no matched snapshot", () => {
@@ -708,7 +788,7 @@ test("buildDashboardFromRows bases recommendation on cheapest competitor and mar
   expect(dashboard.summary.recommended).toBeLessThan(dashboard.summary.average);
 });
 
-test("buildDashboardFromRows uses Elements as the baseline when Elements is already cheaper", () => {
+test("buildDashboardFromRows still anchors recommendation to cheapest competitor when Elements is cheaper", () => {
   const config = {
     competitorVehicles: ["aventus2", "sleeper"],
     elementsVehicles: ["tandem"]
@@ -746,8 +826,8 @@ test("buildDashboardFromRows uses Elements as the baseline when Elements is alre
 
   expect(dashboard.summary.lowest).toBe(220);
   expect(dashboard.summary.elements).toBe(180);
-  expect(dashboard.summary.recommended).toBe(198);
-  expect(dashboard.summary.recommendationSource).toBe("elements");
+  expect(dashboard.summary.recommended).toBe(242);
+  expect(dashboard.summary.recommendationSource).toBe("competitor");
 });
 
 test("buildDashboardFromRows falls back to Elements pricing when competitor data is unavailable", () => {

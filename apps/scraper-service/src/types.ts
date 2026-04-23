@@ -30,6 +30,9 @@ export interface RunSummary {
   maxTripDays: number;
   headless: boolean;
   rowsCaptured: number;
+  rowsProcessed: number;
+  rowsInserted: number;
+  totalRows: number;
   datesVisited: number;
   error?: string;
   artifacts?: {
@@ -40,6 +43,7 @@ export interface RunSummary {
 
 export interface ScrapeRunResult {
   rows: PriceRow[];
+  rowsProcessed: number;
   datesVisited: number;
   warnings: string[];
 }
