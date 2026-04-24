@@ -13,6 +13,39 @@ process.on("unhandledRejection", (err) => {
 const app = express();
 const port = Number(process.env.PORT || 4302);
 
+const NORMALIZED_SCRAPE_DATE_SQL = `
+  CASE
+    WHEN scrape_date GLOB '????-??-??' THEN scrape_date
+    WHEN scrape_date LIKE '%/%/%' THEN
+      printf(
+        '%04d-%02d-%02d',
+        CAST(substr(substr(scrape_date, instr(scrape_date, '/') + 1), instr(substr(scrape_date, instr(scrape_date, '/') + 1), '/') + 1) AS INTEGER),
+        CAST(substr(scrape_date, 1, instr(scrape_date, '/') - 1) AS INTEGER),
+        CAST(substr(substr(scrape_date, instr(scrape_date, '/') + 1), 1, instr(substr(scrape_date, instr(scrape_date, '/') + 1), '/') - 1) AS INTEGER)
+      )
+    ELSE NULL
+  END
+`;
+
+function normalizeVehicle(vehicle) {
+  if (!vehicle) return vehicle;
+
+  const v = String(vehicle).toLowerCase().trim();
+
+  if (v === "trek budget") return "trekbudget";
+  if (v === "trek medium") return "trekmedium";
+  if (v === "trek large") return "treklarge";
+
+  return v;
+}
+
+function normalizeVehicleRows(rows) {
+  return rows.map((row) => ({
+    ...row,
+    vehicle: normalizeVehicle(row.vehicle)
+  }));
+}
+
 app.use(
   cors({
     origin: "http://localhost:3000",
@@ -38,7 +71,13 @@ app.get("/api/latest-scrape-date", (req, res) => {
     console.log("API HIT: /api/latest-scrape-date");
     const db = getDb();
     const result = db
-      .prepare("SELECT MAX(scrape_date) AS latest_scrape_date FROM pricing_data;")
+      .prepare(
+        `
+          SELECT
+            MAX(${NORMALIZED_SCRAPE_DATE_SQL}) AS latest_scrape_date
+          FROM pricing_data;
+        `
+      )
       .get();
 
     res.json({
@@ -55,7 +94,7 @@ app.get("/api/prices", (req, res) => {
     console.log("API HIT: /api/prices");
     const db = getDb();
     const rows = db.prepare("SELECT * FROM pricing_data;").all();
-    res.json(rows);
+    res.json(normalizeVehicleRows(rows));
   } catch (err) {
     console.error("API ERROR:", err);
     res.status(500).json({ error: "Failed to fetch prices" });
@@ -69,8 +108,14 @@ app.get("/api/prices/latest", (req, res) => {
     const rows = db
       .prepare(
         `
-          SELECT p.*
-          FROM pricing_data p
+          WITH normalized AS (
+            SELECT
+              p.*,
+              ${NORMALIZED_SCRAPE_DATE_SQL} AS scrape_date_key
+            FROM pricing_data p
+          )
+          SELECT n.*
+          FROM normalized n
           JOIN (
             SELECT
               pickup_date,
@@ -79,21 +124,21 @@ app.get("/api/prices/latest", (req, res) => {
               company,
               vehicle,
               type,
-              MAX(scrape_date) AS max_scrape_date
-            FROM pricing_data
+              MAX(scrape_date_key) AS max_scrape_date
+            FROM normalized
             GROUP BY pickup_date, dropoff_date, location, company, vehicle, type
           ) latest
-            ON p.pickup_date = latest.pickup_date
-           AND p.dropoff_date = latest.dropoff_date
-           AND p.location = latest.location
-           AND p.company = latest.company
-           AND p.vehicle = latest.vehicle
-           AND p.type = latest.type
-           AND p.scrape_date = latest.max_scrape_date
+            ON n.pickup_date = latest.pickup_date
+           AND n.dropoff_date = latest.dropoff_date
+           AND n.location = latest.location
+           AND n.company = latest.company
+           AND n.vehicle = latest.vehicle
+           AND n.type = latest.type
+           AND n.scrape_date_key = latest.max_scrape_date
         `
       )
       .all();
-    res.json(rows);
+    res.json(normalizeVehicleRows(rows));
   } catch (err) {
     console.error("LATEST PRICES ERROR:", err);
     res.status(500).json({ error: "Failed to fetch latest prices" });
@@ -133,7 +178,7 @@ app.get("/api/trends", async (req, res) => {
     `;
 
     const rows = db.prepare(query).all(...params);
-    res.json(rows);
+    res.json(normalizeVehicleRows(rows));
   } catch (err) {
     console.error("TRENDS ERROR:", err);
     res.status(500).json({ error: err.message });

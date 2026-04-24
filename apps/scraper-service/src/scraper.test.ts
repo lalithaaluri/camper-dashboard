@@ -37,7 +37,7 @@ test("identifyVehicle maps legacy text to normalized dashboard keys", () => {
   );
 });
 
-test("generateMultiMonthMatrix with 2 pickup days returns forward April combinations", () => {
+test("generateMultiMonthMatrix with 2 pickup days expands pickup+dropoff combinations", () => {
   const dates = generateMultiMonthMatrix("2026-04-01", 2);
   assert.equal(dates.length, 57);
   assert.deepEqual(dates[0], {
@@ -63,17 +63,17 @@ test("generateMultiMonthMatrix with 30 trip days covers full April", () => {
   });
 });
 
-test("generateMultiMonthMatrix with 60 trip days covers full April and full May without cross-month pairs", () => {
+test("generateMultiMonthMatrix with 60 pickup days still stops pickup expansion at month boundary", () => {
   const dates = generateMultiMonthMatrix("2026-04-01", 60);
-  assert.equal(dates.length, 900);
+  assert.equal(dates.length, 435);
 
   assert.deepEqual(dates[0], {
     pickupDate: "2026-04-01",
     dropoffDate: "2026-04-02"
   });
   assert.deepEqual(dates[dates.length - 1], {
-    pickupDate: "2026-05-30",
-    dropoffDate: "2026-05-31"
+    pickupDate: "2026-04-29",
+    dropoffDate: "2026-04-30"
   });
 
   assert.equal(

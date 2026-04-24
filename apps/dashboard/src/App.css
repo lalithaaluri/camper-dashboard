@@ -763,7 +763,9 @@ tbody tr:hover {
 }
 
 .table-row--cheapest {
-  background: rgba(45, 106, 79, 0.12);
+  background-color: #e6f4ea;
+  font-weight: 600;
+  border-left: 4px solid #2e7d32;
 }
 
 .table-row--highest {
@@ -773,6 +775,30 @@ tbody tr:hover {
 .table-empty {
   min-height: auto;
   padding: 1.4rem;
+}
+
+.percent-pill {
+  display: inline-block;
+  min-width: 66px;
+  padding: 0.24rem 0.5rem;
+  border-radius: 999px;
+  font-weight: 600;
+  text-align: center;
+}
+
+.percent-pill--cheapest {
+  background: rgba(46, 125, 50, 0.18);
+  color: #1b5e20;
+}
+
+.percent-pill--higher {
+  background: rgba(183, 28, 28, 0.14);
+  color: #8f1d1d;
+}
+
+.percent-pill--neutral {
+  background: rgba(96, 125, 139, 0.18);
+  color: #455a64;
 }
 
 .ui-loading {

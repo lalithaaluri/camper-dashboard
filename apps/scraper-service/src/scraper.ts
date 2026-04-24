@@ -1,30 +1,38 @@
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { chromium, type Locator, type Page } from "playwright";
-import { BASE_URL, DEPOTS, identifyVehicle } from "./config.js";
+import { BASE_URL, DEPOTS, generateDropoffDates, identifyVehicle } from "./config.js";
 import { paths } from "./storage.js";
 import type { DepotCode, PriceRow, ScrapeRequest, ScrapeRunResult } from "./types.js";
 
-export function generateCombos(pickupDate: string, pickupDays: number) {
+export function generateCombos(startDate: string, pickupWindow: number) {
   const combos: Array<{ pickupDate: string; dropoffDate: string }> = [];
-  const [startYear, startMonth, startDay] = pickupDate.split("-").map((value) => Number(value));
+  const [startYear, startMonth, startDay] = startDate.split("-").map((value) => Number(value));
   const start = new Date(Date.UTC(startYear, startMonth - 1, startDay));
 
-  for (let i = 0; i < pickupDays; i += 1) {
-    const pickup = new Date(start);
-    pickup.setUTCDate(start.getUTCDate() + i);
+  for (let d = 0; d < pickupWindow; d += 1) {
+    const currentPickup = new Date(start);
+    currentPickup.setUTCDate(start.getUTCDate() + d);
 
-    const year = pickup.getUTCFullYear();
-    const month = pickup.getUTCMonth();
+    // Stop if pickup leaves the start month.
+    if (currentPickup.getUTCMonth() !== start.getUTCMonth()) {
+      break;
+    }
 
-    for (let j = pickup.getUTCDate() + 1; j <= 31; j += 1) {
-      const dropoff = new Date(Date.UTC(year, month, j));
-      if (dropoff.getUTCMonth() !== month) {
+    const currentPickupIso = currentPickup.toISOString().slice(0, 10);
+
+    // Generate all dropoffs until month end for this pickup.
+    for (let i = 1; i < 31; i += 1) {
+      const dropoff = new Date(currentPickup);
+      dropoff.setUTCDate(currentPickup.getUTCDate() + i);
+
+      // Stop if dropoff leaves pickup month.
+      if (dropoff.getUTCMonth() !== currentPickup.getUTCMonth()) {
         break;
       }
 
       combos.push({
-        pickupDate: pickup.toISOString().slice(0, 10),
+        pickupDate: currentPickupIso,
         dropoffDate: dropoff.toISOString().slice(0, 10)
       });
     }
@@ -43,29 +51,15 @@ export function generateDateCombinations(pickupDate: string, maxTripDays: number
 
 const SEARCH_TIMEOUT_MS = 20_000;
 const RESULTS_TIMEOUT_MS = 30_000;
-const RESULTS_SELECTOR = ".price-label, [class*='price-label']";
-const RESULTS_CONTAINER_SELECTOR = ".vehicle-card, .price-label";
-const SEARCH_URL = BASE_URL;
 const SEARCH_FORM_SELECTOR = "form[action='/widget/book/search']";
+const RESULTS_SELECTOR = ".price-label, [class*='price-label']";
 
 const cleanPrice = (value: string) => {
-  const compact = value.replace(/,/g, "");
-  const directParsed = Number.parseFloat(compact.replace(/[^0-9.]/g, ""));
-  if (Number.isFinite(directParsed) && directParsed > 0) {
-    return directParsed;
-  }
-
-  const matches = compact.match(/\d+(?:\.\d+)?/g) || [];
-  const values = matches
-    .map((entry) => Number(entry))
-    .filter((entry) => Number.isFinite(entry) && entry > 0);
-
-  if (!values.length) {
-    return null;
-  }
-
-  return Math.max(...values);
+  const numeric = Number(value.replace(/[^\d.]/g, ""));
+  return Number.isFinite(numeric) ? numeric : null;
 };
+
+const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 const isVisible = async (locator: Locator) => {
   if ((await locator.count()) === 0) {
@@ -85,27 +79,6 @@ const escapeForRegExp = (value: string) =>
 const formatDisplayDate = (value: string) => {
   const [year, month, day] = value.split("-");
   return `${day}/${month}/${year}`;
-};
-
-const tryFill = async (locator: Locator, value: string) => {
-  if (!(await isVisible(locator))) {
-    return false;
-  }
-
-  const field = locator.first();
-
-  try {
-    const tagName = await field.evaluate((node) => node.tagName.toLowerCase());
-    if (tagName === "select") {
-      await field.selectOption({ label: value }).catch(async () => field.selectOption(value));
-    } else {
-      await field.fill("");
-      await field.fill(value);
-    }
-    return true;
-  } catch {
-    return false;
-  }
 };
 
 const setSelectizeValue = async (
@@ -142,57 +115,33 @@ const setSelectizeValue = async (
         return false;
       }
 
-      let directValue: string | null = null;
-      for (const group of groups) {
-        if (group.L === optionLabel && typeof group.V !== "undefined") {
-          directValue = String(group.V);
-          break;
-        }
-      }
-
-      if (directValue !== null) {
-        selectize.setValue(directValue);
-        return selectize.getValue() === directValue;
+      const directMatch = groups.find(
+        (group) => group.L === optionLabel && typeof group.V !== "undefined"
+      );
+      if (directMatch?.V !== undefined) {
+        selectize.setValue(String(directMatch.V));
+        return selectize.getValue() === String(directMatch.V);
       }
 
       if (allowSameAsPickup) {
-        for (const group of groups) {
-          if (group.L === "Same as Pick Up" && typeof group.V !== "undefined") {
-            const sameAsPickupValue = String(group.V);
-            selectize.setValue(sameAsPickupValue);
-            return selectize.getValue() === sameAsPickupValue;
-          }
+        const sameAsPickup = groups.find((group) => group.L === "Same as Pick Up");
+        if (sameAsPickup?.V !== undefined) {
+          selectize.setValue(String(sameAsPickup.V));
+          return selectize.getValue() === String(sameAsPickup.V);
         }
       }
 
-      let matchingGroupLabel: string | null = null;
-      let matchingOptionValue: string | null = null;
-      for (const group of groups) {
-        if (!Array.isArray(group.O)) {
-          continue;
-        }
-
-        for (const option of group.O) {
-          if (option.L === optionLabel) {
-            matchingGroupLabel = group.L;
-            matchingOptionValue = String(option.V);
-            break;
-          }
-        }
-
-        if (matchingGroupLabel && matchingOptionValue) {
-          break;
-        }
-      }
-
-      if (!matchingGroupLabel || !matchingOptionValue) {
+      const matchingGroup = groups.find(
+        (group) => Array.isArray(group.O) && group.O.some((option) => option.L === optionLabel)
+      );
+      const matchingOption = matchingGroup?.O?.find((option) => option.L === optionLabel);
+      if (!matchingGroup || !matchingOption) {
         return false;
       }
 
-      selectize.setValue(matchingGroupLabel);
-      selectize.setValue(matchingOptionValue);
-
-      return selectize.getValue() === matchingOptionValue;
+      selectize.setValue(String(matchingGroup.L));
+      selectize.setValue(String(matchingOption.V));
+      return selectize.getValue() === String(matchingOption.V);
     },
     { selector, optionLabel, allowSameAsPickup }
   );
@@ -224,8 +173,12 @@ const fillBookingWidget = async (
         return false;
       }
 
-      const hiddenPickup = form.querySelector('input[name="Parameters.DateFrom"]') as HTMLInputElement | null;
-      const hiddenDropoff = form.querySelector('input[name="Parameters.DateTo"]') as HTMLInputElement | null;
+      const hiddenPickup = form.querySelector(
+        'input[name="Parameters.DateFrom"]'
+      ) as HTMLInputElement | null;
+      const hiddenDropoff = form.querySelector(
+        'input[name="Parameters.DateTo"]'
+      ) as HTMLInputElement | null;
       const visiblePickup = form.querySelector(".display-fr") as HTMLInputElement | null;
       const visibleDropoff = form.querySelector(".display-to") as HTMLInputElement | null;
 
@@ -290,11 +243,11 @@ const dismissOverlays = async (page: Page) => {
 };
 
 const waitForResults = async (page: Page) => {
-  await page.waitForURL(
-    new RegExp(`${escapeForRegExp(BASE_URL)}/bookings/\\?__p=book_search_`, "i"),
-    { timeout: RESULTS_TIMEOUT_MS }
-  );
   await page.waitForLoadState("domcontentloaded", { timeout: SEARCH_TIMEOUT_MS });
+  await page.waitForLoadState("networkidle", { timeout: SEARCH_TIMEOUT_MS }).catch(() => undefined);
+  // Python flow uses sleep and then scrapes; do the same by waiting for attachment, not visibility.
+  await page.waitForSelector(RESULTS_SELECTOR, { timeout: RESULTS_TIMEOUT_MS, state: "attached" });
+  await page.waitForTimeout(8_000);
 };
 
 const collectCurrentPageRows = async (
@@ -302,151 +255,93 @@ const collectCurrentPageRows = async (
   pickupDate: string,
   dropoffDate: string,
   depot: DepotCode,
-  scrapeDate: string,
-  stats?: {
-    skippedInvalidRows: number;
-    skippedUnmatchedRows: number;
-  }
+  scrapeDate: string
 ) => {
-  const payloads = await page.evaluate(() => {
-    const isVisible = (element: HTMLElement | null) => {
-      if (!element) {
-        return false;
-      }
+  const blocks = page.locator(RESULTS_SELECTOR);
+  const count = await blocks.count();
+  const rows: PriceRow[] = [];
 
-      const rect = element.getBoundingClientRect();
-      const style = window.getComputedStyle(element);
-      return !(
-        rect.width === 0 ||
-        rect.height === 0 ||
-        style.display === "none" ||
-        style.visibility === "hidden" ||
-        style.opacity === "0"
-      );
-    };
+  console.log("[SCRAPER] Vehicles/price blocks found:", count);
 
-    const normalizeText = (value: string) => value.replace(/\s+/g, " ").trim();
-
-    const cards = Array.from(
-      document.querySelectorAll(".vehicle-card, .result-item, .search-result-item")
-    ) as HTMLElement[];
-    const cardPayloads = cards.flatMap((card) => {
-      if (!isVisible(card)) {
-        return [];
-      }
-
-      const priceNode = card.querySelector(".price-label, [class*='price-label']") as HTMLElement | null;
-      if (!isVisible(priceNode)) {
-        return [];
-      }
-
-      return [
-        {
-          priceText: priceNode?.textContent || "",
-          fullText: normalizeText(card.textContent || "")
-        }
-      ];
-    });
-
-    if (cardPayloads.length > 0) {
-      return cardPayloads;
-    }
-
-    return Array.from(document.querySelectorAll(".price-label, [class*='price-label']")).flatMap((node) => {
-      const element = node as HTMLElement;
-      if (!isVisible(element)) {
-        return [];
-      }
-
-      const priceText = element.textContent || "";
-      let current: HTMLElement | null = element.parentElement;
+  for (let index = 0; index < count; index += 1) {
+    const payload = await blocks.nth(index).evaluate((node) => {
+      const priceNode = node.querySelector("p");
+      const priceText = (priceNode?.textContent || node.textContent || "").trim();
+      let current = node.parentElement;
       let fullText = "";
 
       for (let hops = 0; hops < 10 && current; hops += 1) {
-        fullText = normalizeText(current.textContent || "");
+        fullText = (current.textContent || "").replace(/\s+/g, " ").trim();
         if (fullText.length > 50) {
           break;
         }
         current = current.parentElement;
       }
 
-      return [{ priceText, fullText }];
+      return { priceText, fullText };
     });
-  });
 
-  return payloads.flatMap((payload) => {
     const price = cleanPrice(payload.priceText);
-    console.log("DEBUG PRICE:", price, typeof price);
-    const fullText = String(payload.fullText || "");
+    const match = identifyVehicle(payload.fullText);
 
-    let match:
-      | {
-          company: string;
-          vehicle: string;
-          type: "elements";
-        }
-      | ReturnType<typeof identifyVehicle> = null;
-
-    const text = fullText.toLowerCase();
-
-    if (text.includes("trek")) {
-      let vehicle = "trek";
-
-      if (text.includes("large")) {
-        vehicle = "trek large";
-      } else if (text.includes("medium")) {
-        vehicle = "trek medium";
-      } else if (text.includes("budget")) {
-        vehicle = "trek budget";
-      }
-
-      match = {
-        company: "elementsworld",
-        vehicle,
-        type: "elements"
-      };
+    if (!price || !match) {
+      continue;
     }
 
-    if (!match) {
-      match = identifyVehicle(payload.fullText);
+    console.log("[SCRAPER] Extracted:", {
+      company: match.company,
+      vehicle: match.vehicle,
+      type: match.type,
+      price
+    });
+
+    rows.push({
+      pickup_date: pickupDate,
+      dropoff_date: dropoffDate,
+      location: depot,
+      company: match.company,
+      vehicle: match.vehicle,
+      price,
+      scrape_date: scrapeDate,
+      type: match.type
+    });
+  }
+
+  return rows;
+};
+
+const nextPage = async (page: Page) => {
+  const candidates = [
+    page.getByRole("link", { name: /next/i }),
+    page.getByRole("button", { name: /next/i }),
+    page.locator("a.next"),
+    page.locator(".page-numbers.next")
+  ];
+
+  for (const candidate of candidates) {
+    if (!(await isVisible(candidate))) {
+      continue;
     }
 
-    if (!match) {
-      if (stats) {
-        stats.skippedUnmatchedRows += 1;
+    const control = candidate.first();
+    try {
+      const disabled =
+        (await control.getAttribute("aria-disabled")) === "true" ||
+        (await control.getAttribute("class"))?.includes("disabled");
+      if (disabled) {
+        return false;
       }
-      return [];
-    }
 
-    const parsedPrice = Number(price);
-    if (!Number.isFinite(parsedPrice) || parsedPrice < 50) {
-      if (stats) {
-        stats.skippedInvalidRows += 1;
-      }
-      console.log("Skipping invalid price row:", {
-        priceText: payload.priceText,
-        pickup_date: pickupDate,
-        dropoff_date: dropoffDate,
-        company: match.company,
-        vehicle: match.vehicle,
-        price: parsedPrice
-      });
-      return [];
+      await control.click();
+      await pause(1_500);
+      await page.waitForLoadState("networkidle", { timeout: SEARCH_TIMEOUT_MS }).catch(() => undefined);
+      return true;
+    } catch {
+      continue;
     }
+  }
 
-    return [
-      {
-        pickup_date: pickupDate,
-        dropoff_date: dropoffDate,
-        location: depot,
-        company: match.company,
-        vehicle: match.vehicle,
-        price: parsedPrice,
-        scrape_date: scrapeDate,
-        type: match.type
-      }
-    ];
-  });
+  return false;
 };
 
 const scrapeQuoteSet = async (
@@ -457,125 +352,46 @@ const scrapeQuoteSet = async (
   scrapeDate: string,
   warnings: string[]
 ) => {
-  await page.goto(SEARCH_URL, { waitUntil: "domcontentloaded", timeout: SEARCH_TIMEOUT_MS });
+  console.log(`[SCRAPER] Loading page for ${depot} ${pickupDate} -> ${dropoffDate}`);
+  await page.goto(BASE_URL, { waitUntil: "domcontentloaded", timeout: SEARCH_TIMEOUT_MS });
   await dismissOverlays(page);
   await page.locator(SEARCH_FORM_SELECTOR).first().waitFor({ timeout: SEARCH_TIMEOUT_MS });
-
-  const pickupInput = page.locator('input[name="pickup_date"]').first();
-  const dropoffInput = page.locator('input[name="dropoff_date"]').first();
-  await tryFill(pickupInput, "");
-  await tryFill(dropoffInput, "");
-  await tryFill(pickupInput, pickupDate);
-  await tryFill(dropoffInput, dropoffDate);
+  console.log("[SCRAPER] Search form loaded");
 
   const widgetReady = await fillBookingWidget(page, depot, pickupDate, dropoffDate);
-  await page.waitForSelector('button[type="submit"]', {
-    state: "visible",
-    timeout: SEARCH_TIMEOUT_MS
-  }).catch(() => undefined);
-
-  let submitted = false;
-  try {
-    await Promise.all([
-      page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: SEARCH_TIMEOUT_MS }),
-      page.click('button[type="submit"]')
-    ]);
-    submitted = true;
-  } catch {
-    try {
-      await page.click('button[type="submit"]');
-      await page.waitForLoadState("domcontentloaded", { timeout: SEARCH_TIMEOUT_MS }).catch(() => undefined);
-      submitted = true;
-    } catch {
-      submitted = await submitSearch(page);
-    }
-  }
+  const submitted = await submitSearch(page);
 
   if (!widgetReady || !submitted) {
-    warnings.push(
-      `Unable to fully automate the search form for ${depot} ${pickupDate} -> ${dropoffDate}.`
-    );
+    warnings.push(`Unable to fully automate the search form for ${depot} ${pickupDate} -> ${dropoffDate}.`);
     await writeFile(
       path.join(paths.artifactsDir, `failed-form-${depot}-${pickupDate}-${dropoffDate}.html`),
       await page.content(),
       "utf8"
     );
+    await page.screenshot({
+      path: path.join(paths.artifactsDir, `failed-form-${depot}-${pickupDate}-${dropoffDate}.png`),
+      fullPage: true
+    }).catch(() => undefined);
     throw new Error(`Search form automation failed for ${depot} ${pickupDate} -> ${dropoffDate}`);
   }
 
+  console.log("[SCRAPER] Search submitted, waiting for results");
   await waitForResults(page);
-  await page.waitForSelector(RESULTS_CONTAINER_SELECTOR, { timeout: 15_000 }).catch(() => undefined);
-  await page.waitForLoadState("domcontentloaded", { timeout: SEARCH_TIMEOUT_MS }).catch(() => undefined);
-  await page.evaluate(async () => {
-    await new Promise<void>((resolve) => {
-      let totalHeight = 0;
-      const distance = 300;
-      const timer = window.setInterval(() => {
-        window.scrollBy(0, distance);
-        totalHeight += distance;
-        if (totalHeight >= document.body.scrollHeight) {
-          window.clearInterval(timer);
-          resolve();
-        }
-      }, 200);
-    });
-  });
-  await page.waitForTimeout(2000);
-  await page.waitForTimeout(3000);
-
-  let priceElements: Awaited<ReturnType<Page["locator"]>["all"]> = [];
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    priceElements = await page.locator(RESULTS_SELECTOR).all();
-
-    if (priceElements.length > 0) {
-      break;
-    }
-
-    console.log("Waiting for results...");
-    await page.waitForTimeout(1500);
-  }
-
-  if (priceElements.length === 0) {
-    console.log("No results after retry, continuing extraction pass...");
-  }
-
-  const results = priceElements.length;
-  console.log("Results found:", results);
-  if (results < 5) {
-    const warning = `Low result count (${results}) for ${depot} ${pickupDate} -> ${dropoffDate}.`;
-    console.warn(warning);
-    warnings.push(warning);
-  }
+  console.log("[SCRAPER] Results page loaded:", page.url());
 
   const minimumByKey = new Map<string, PriceRow>();
   const seenPages = new Set<string>();
-  const pages = page.locator(".pagination a");
-  let pageIndex = 0;
-  let totalVehiclesFound = 0;
-  let competitorRowsFound = 0;
-  let elementsRowsFound = 0;
-  const extractionStats = {
-    skippedInvalidRows: 0,
-    skippedUnmatchedRows: 0
-  };
 
   while (true) {
-    console.log("Scraping page:", pageIndex + 1);
-
-    const pageRows = await collectCurrentPageRows(
-      page,
-      pickupDate,
-      dropoffDate,
-      depot,
-      scrapeDate,
-      extractionStats
-    );
-    totalVehiclesFound += pageRows.length;
-    competitorRowsFound += pageRows.filter((row) => row.type === "competitor").length;
-    elementsRowsFound += pageRows.filter((row) => row.type === "elements").length;
-
+    const pageRows = await collectCurrentPageRows(page, pickupDate, dropoffDate, depot, scrapeDate);
     pageRows.forEach((row) => {
-      const key = `${row.pickup_date}_${row.dropoff_date}_${row.location}_${row.company}_${row.vehicle}`;
+      const key = [
+        row.pickup_date,
+        row.dropoff_date,
+        row.location,
+        row.company,
+        row.vehicle
+      ].join("|");
       const existing = minimumByKey.get(key);
       if (!existing || row.price < existing.price) {
         minimumByKey.set(key, row);
@@ -588,30 +404,19 @@ const scrapeQuoteSet = async (
     }
     seenPages.add(pageSignature);
 
-    const nextPage = pages.nth(pageIndex + 1);
-    if (!(await nextPage.isVisible())) {
-      console.log("No more pages");
+    const advanced = await nextPage(page);
+    if (!advanced) {
       break;
     }
-
-    await Promise.all([
-      nextPage.click(),
-      page.waitForLoadState("networkidle", { timeout: SEARCH_TIMEOUT_MS }).catch(() => undefined)
-    ]);
-
-    pageIndex += 1;
   }
 
-  console.log("Combo extraction summary:", {
-    pickup_date: pickupDate,
-    dropoff_date: dropoffDate,
-    location: depot,
-    totalVehiclesFound,
-    competitorRowsFound,
-    elementsRowsFound,
-    skippedInvalidRows: extractionStats.skippedInvalidRows,
-    skippedUnmatchedRows: extractionStats.skippedUnmatchedRows,
-    reducedRows: minimumByKey.size
+  console.log("[SCRAPER] Combo summary:", {
+    depot,
+    pickupDate,
+    dropoffDate,
+    rows: minimumByKey.size,
+    elements: Array.from(minimumByKey.values()).filter((row) => row.type === "elements").length,
+    competitors: Array.from(minimumByKey.values()).filter((row) => row.type === "competitor").length
   });
 
   return Array.from(minimumByKey.values());
@@ -626,96 +431,73 @@ export const runAutomatedScrape = async (
     pairRows: PriceRow[];
   }) => Promise<void> | void
 ): Promise<ScrapeRunResult> => {
+  console.log("[SCRAPER] Run started:", {
+    runId,
+    pickupDate: request.pickupDate,
+    locations: request.locations,
+    maxTripDays: request.maxTripDays,
+    headless: request.headless
+  });
+
   const browser = await chromium.launch({ headless: request.headless });
   const context = await browser.newContext({ locale: "en-NZ", timezoneId: "Pacific/Auckland" });
   const page = await context.newPage();
   const scrapeDate = new Date().toISOString().slice(0, 10);
   const warnings: string[] = [];
   const rows: PriceRow[] = [];
-  let consecutiveNoInsertCombos = 0;
   let datesVisited = 0;
-  const pickupDate = request.pickupDate;
-  const maxTripDays =
-    (request as ScrapeRequest & { tripDays?: number }).tripDays ?? request.maxTripDays;
-
-  console.log("Starting scrape with:");
-  console.log("pickupDate received:", pickupDate);
-  console.log("maxTripDays:", maxTripDays);
 
   try {
     for (const depot of request.locations) {
-      const dates = generateDateCombinations(pickupDate, maxTripDays);
-      console.log("Generated dates count:", dates.length);
-      console.log("Entering loop");
-
-      if (dates.length === 0) {
+      const datePairs = generateDateCombinations(request.pickupDate, request.maxTripDays);
+      if (datePairs.length === 0) {
         throw new Error("No date combinations generated");
       }
 
-      for (const combo of dates) {
-        console.log("Processing combo:", combo);
-        datesVisited += 1;
+      const pickupDatesVisited = new Set<string>();
+      for (const pair of datePairs) {
+        if (!pickupDatesVisited.has(pair.pickupDate)) {
+          pickupDatesVisited.add(pair.pickupDate);
+          datesVisited += 1;
+        }
+        console.log("[SCRAPER] Processing combo:", {
+          depot,
+          pickupDate: pair.pickupDate,
+          dropoffDate: pair.dropoffDate
+        });
+
         try {
+          console.log("Scraping:", pair.pickupDate, "→", pair.dropoffDate);
           const pairRows = await scrapeQuoteSet(
             page,
-            combo.pickupDate,
-            combo.dropoffDate,
+            pair.pickupDate,
+            pair.dropoffDate,
             depot,
             scrapeDate,
             warnings
           );
-          if (pairRows.length === 0) {
-            consecutiveNoInsertCombos += 1;
-            const warning = `No rows extracted for combo ${depot} ${combo.pickupDate} -> ${combo.dropoffDate}.`;
-            console.warn(warning);
-            warnings.push(warning);
-          } else {
-            consecutiveNoInsertCombos = 0;
-          }
-
           rows.push(...pairRows);
+
           await onProgress?.({
             rowsProcessed: rows.length,
             datesVisited,
             pairRows
           });
-
-          if (consecutiveNoInsertCombos >= 5) {
-            const warning = `Stopping early after ${consecutiveNoInsertCombos} consecutive combos with zero rows.`;
-            console.warn(warning);
-            warnings.push(warning);
-            break;
-          }
         } catch (error) {
-          console.error(
-            `SCRAPER ERROR: combo failed for ${depot} ${combo.pickupDate} -> ${combo.dropoffDate}`,
-            error
-          );
-          warnings.push(
-            `Combo failed for ${depot} ${combo.pickupDate} -> ${combo.dropoffDate}: ${
-              error instanceof Error ? error.message : "unknown error"
-            }`
-          );
+          const message = error instanceof Error ? error.message : "unknown error";
+          console.error("[SCRAPER] Combo failed:", { depot, pair, message });
+          warnings.push(`Combo failed for ${depot} ${pair.pickupDate} -> ${pair.dropoffDate}: ${message}`);
           await onProgress?.({
             rowsProcessed: rows.length,
             datesVisited,
             pairRows: []
           });
-          consecutiveNoInsertCombos += 1;
-          if (consecutiveNoInsertCombos >= 5) {
-            const warning = `Stopping early after ${consecutiveNoInsertCombos} consecutive failed/empty combos.`;
-            console.warn(warning);
-            warnings.push(warning);
-            break;
-          }
-          continue;
         }
       }
     }
   } catch (error) {
-    console.error("SCRAPER ERROR:", error);
-    const originalMessage =
-      error instanceof Error ? error.message : "Unknown scraping error";
+    console.error("[SCRAPER] Fatal run error:", error);
+    const originalMessage = error instanceof Error ? error.message : "Unknown scraping error";
     const diagnostics: string[] = [];
 
     try {
@@ -756,6 +538,13 @@ export const runAutomatedScrape = async (
     await context.close();
     await browser.close();
   }
+
+  console.log("[SCRAPER] Run finished:", {
+    runId,
+    rowsProcessed: rows.length,
+    datesVisited,
+    warnings: warnings.length
+  });
 
   return { rows, rowsProcessed: rows.length, datesVisited, warnings };
 };

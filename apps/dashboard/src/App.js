@@ -181,24 +181,104 @@ const parseDate = (value) => {
     return null;
   }
 
-  const nativeDate = new Date(value);
-  if (!Number.isNaN(nativeDate.getTime())) {
-    return nativeDate;
+  if (value instanceof Date) {
+    if (!Number.isNaN(value.getTime())) {
+      return value;
+    }
+    return null;
   }
 
-  const parts = String(value).split("/");
-  if (parts.length === 3) {
-    const [month, day, year] = parts;
-    const fallback = new Date(`${year}-${month}-${day}`);
-    if (!Number.isNaN(fallback.getTime())) {
-      return fallback;
+  const normalizeInternalDate = (raw, { preferDayFirst = false } = {}) => {
+    const trimmed = String(raw || "").trim();
+    if (!trimmed) {
+      return "";
     }
+
+    const isoMatch = trimmed.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+    if (isoMatch) {
+      const [, year, month, day] = isoMatch;
+      return `${year.padStart(4, "0")}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+    }
+
+    const slashMatch = trimmed.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (!slashMatch) {
+      return "";
+    }
+
+    const first = Number(slashMatch[1]);
+    const second = Number(slashMatch[2]);
+    const year = slashMatch[3];
+
+    let day = first;
+    let month = second;
+
+    // Ambiguous slash dates: keep UI day-first, otherwise infer from value ranges.
+    if (!preferDayFirst) {
+      if (first > 12 && second <= 12) {
+        day = first;
+        month = second;
+      } else if (second > 12 && first <= 12) {
+        month = first;
+        day = second;
+      } else {
+        // API legacy values are month/day/year when ambiguous.
+        month = first;
+        day = second;
+      }
+    }
+
+    return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  };
+
+  const normalized = normalizeInternalDate(value, { preferDayFirst: true });
+  if (normalized) {
+    const normalizedDate = new Date(`${normalized}T00:00:00`);
+    if (!Number.isNaN(normalizedDate.getTime())) {
+      return normalizedDate;
+    }
+  }
+
+  const nativeDate = new Date(String(value));
+  if (!Number.isNaN(nativeDate.getTime())) {
+    return nativeDate;
   }
 
   return null;
 };
 
 const toDateKey = (value) => {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    const isoMatch = trimmed.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+    if (isoMatch) {
+      const [, year, month, day] = isoMatch;
+      return `${year.padStart(4, "0")}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+    }
+
+    const slashMatch = trimmed.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (slashMatch) {
+      const first = Number(slashMatch[1]);
+      const second = Number(slashMatch[2]);
+      const year = slashMatch[3];
+
+      let day = first;
+      let month = second;
+
+      if (!(first > 12 && second <= 12)) {
+        if (second > 12 && first <= 12) {
+          month = first;
+          day = second;
+        } else {
+          // API legacy ambiguity defaults to month/day/year.
+          month = first;
+          day = second;
+        }
+      }
+
+      return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    }
+  }
+
   const date = value instanceof Date ? value : parseDate(value);
   if (!date) {
     return "";
@@ -1721,8 +1801,12 @@ function App() {
   const [scrapeHeadless, setScrapeHeadless] = useState(true);
   const [scrapeSubmitting, setScrapeSubmitting] = useState(false);
   const [scraperStatus, setScraperStatus] = useState(initialScraperStatus);
+  const [dataReloadTrigger, setDataReloadTrigger] = useState(0);
+  const [scrapeRunFeedback, setScrapeRunFeedback] = useState("");
   const pickupDateInputRef = useRef(null);
   const dropoffDateInputRef = useRef(null);
+  const scrapePickupDateInputRef = useRef(null);
+  const lastAutoRefreshedRunIdRef = useRef(null);
   const pickupDate = selectedDate;
   const dropoffDate = selectedDropoff;
   const handlePickupDateChange = (event) => {
@@ -1758,12 +1842,15 @@ function App() {
 
   useEffect(() => {
     let cancelled = false;
-    const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), 30000);
+    let activeController = null;
 
     setLoading(true);
     setLoadError("");
     const loadData = async () => {
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), 30000);
+      activeController = controller;
+
       try {
         const pricesUrl = `${PRICING_API_BASE}/api/prices/latest`;
         const trendsUrl = `${PRICING_API_BASE}/api/prices`;
@@ -1793,10 +1880,10 @@ function App() {
         const toDashboardRows = (sourceRows) =>
           (Array.isArray(sourceRows) ? sourceRows : [])
             .map((row) => {
-              const dateObject = parseDate(row.pickup_date);
-              const dropoffObject = parseDate(row.dropoff_date);
-              const dateKey = toDateKey(dateObject);
-              const dropoffDateKey = toDateKey(dropoffObject);
+              const dateKey = toDateKey(row.pickup_date);
+              const dropoffDateKey = toDateKey(row.dropoff_date);
+              const dateObject = parseDate(dateKey);
+              const dropoffObject = parseDate(dropoffDateKey);
               const price = Number(row.price);
 
               if (!dateKey || !dropoffDateKey || !Number.isFinite(price)) {
@@ -1835,17 +1922,23 @@ function App() {
           setLoading(false);
         }
         window.clearTimeout(timeoutId);
+        if (activeController === controller) {
+          activeController = null;
+        }
       }
     };
 
     loadData();
+    const timer = window.setInterval(loadData, 15000);
 
     return () => {
       cancelled = true;
-      controller.abort();
-      window.clearTimeout(timeoutId);
+      if (activeController) {
+        activeController.abort();
+      }
+      window.clearInterval(timer);
     };
-  }, []);
+  }, [dataReloadTrigger]);
 
   useEffect(() => {
     if (!loading) {
@@ -1901,6 +1994,20 @@ function App() {
       window.clearInterval(timer);
     };
   }, []);
+
+  useEffect(() => {
+    const latest = scraperStatus.latestRun;
+    if (!latest?.id || latest.status !== "completed") {
+      return;
+    }
+
+    if (lastAutoRefreshedRunIdRef.current === latest.id) {
+      return;
+    }
+
+    lastAutoRefreshedRunIdRef.current = latest.id;
+    setDataReloadTrigger((current) => current + 1);
+  }, [scraperStatus.latestRun]);
 
   useEffect(() => {
     if (!rows.length) {
@@ -2274,7 +2381,23 @@ function App() {
     return `Prices were unchanged from ${fromLabel} to ${toLabel}`;
   })();
   const latestRun = scraperStatus.latestRun;
+  const isScrapeRunActive =
+    scrapeSubmitting ||
+    Boolean(scraperStatus.activeRunId) ||
+    latestRun?.status === "queued" ||
+    latestRun?.status === "running";
+  const runStatusLabel = latestRun?.status || "idle";
+  const rowsInsertedMessage =
+    latestRun?.status === "completed"
+      ? Number(latestRun?.rowsInserted || 0) === 0
+        ? "No new data (already exists)"
+        : `${formatCount(latestRun?.rowsInserted || 0)} new rows inserted`
+      : "";
   const cheapestQuoteRow = quoteTableRows.find((row) => !row.isElements) || null;
+  const cheapestCompetitorPrice =
+    cheapestQuoteRow && Number.isFinite(Number(cheapestQuoteRow.price))
+      ? Number(cheapestQuoteRow.price)
+      : null;
   const highestQuoteRow =
     quoteTableRows.length > 0
       ? [...quoteTableRows]
@@ -2317,7 +2440,7 @@ function App() {
   };
 
   const refreshDataset = () => {
-    window.location.reload();
+    setDataReloadTrigger((current) => current + 1);
   };
 
   const triggerScrape = async (overrideLocations) => {
@@ -2349,6 +2472,7 @@ function App() {
         throw new Error(payload.error || "Scrape request failed");
       }
 
+      setScrapeRunFeedback(`Scraper started... Run ID: ${payload.id}`);
       setScraperStatus((current) => ({
         ...current,
         activeRunId: payload.id,
@@ -2363,6 +2487,7 @@ function App() {
         ...current,
         error: error instanceof Error ? error.message : "Scrape request failed"
       }));
+      setScrapeRunFeedback("");
     } finally {
       setScrapeSubmitting(false);
     }
@@ -2908,55 +3033,83 @@ function App() {
                   <th>Pickup</th>
                   <th>Dropoff</th>
                   <th>Duration</th>
-                  <th>Price ↑</th>
+                  <th>Price</th>
                   <th>Daily Rate</th>
+                  <th>% vs Cheapest</th>
                 </tr>
               </thead>
               <tbody>
                 {quoteTableRows.length ? (
-                  quoteTableRows.map((row) => (
-                    <tr
-                      key={`${row.company}-${row.normalizedVehicle}-${row.dateKey}-${row.dropoffDateKey}-${row.price}`}
-                      className={[
-                        row.isElements ? "table-row--elements" : "",
-                        cheapestQuoteRow &&
-                        !row.isElements &&
-                        row.company === cheapestQuoteRow.company &&
-                        row.vehicle === cheapestQuoteRow.vehicle &&
-                        row.price === cheapestQuoteRow.price
-                          ? "table-row--cheapest"
-                          : "",
-                        highestQuoteRow &&
-                        !row.isElements &&
-                        row.company === highestQuoteRow.company &&
-                        row.vehicle === highestQuoteRow.vehicle &&
-                        row.price === highestQuoteRow.price
-                          ? "table-row--highest"
-                          : ""
-                      ]
-                        .filter(Boolean)
-                        .join(" ")}
-                    >
-                      <td>{row.isElements ? "Elements World" : row.company}</td>
-                      <td>{row.vehicle}</td>
-                      <td>{formatDateLabel(row.dateKey, { year: "numeric" })}</td>
-                      <td>{formatDateLabel(row.dropoffDateKey, { year: "numeric" })}</td>
-                      <td>
-                        {row.durationDays !== null && row.durationDays !== undefined
-                          ? `${row.durationDays}`
-                          : "No data"}
-                      </td>
-                      <td>{formatCurrency(row.price)}</td>
-                      <td>
-                        {row.dailyRate !== null && row.dailyRate !== undefined
-                          ? formatCurrency(row.dailyRate)
-                          : "No data"}
-                      </td>
-                    </tr>
-                  ))
+                  quoteTableRows.map((row) => {
+                    const isCheapestCompetitor =
+                      Boolean(cheapestQuoteRow) &&
+                      !row.isElements &&
+                      row.company === cheapestQuoteRow.company &&
+                      row.vehicle === cheapestQuoteRow.vehicle &&
+                      row.price === cheapestQuoteRow.price;
+                    const percentDiff =
+                      cheapestCompetitorPrice !== null &&
+                      cheapestCompetitorPrice > 0 &&
+                      Number.isFinite(Number(row.price))
+                        ? ((Number(row.price) - cheapestCompetitorPrice) / cheapestCompetitorPrice) * 100
+                        : null;
+                    const percentClass =
+                      percentDiff === null
+                        ? ""
+                        : Math.abs(percentDiff) < 0.0001
+                        ? "percent-pill--cheapest"
+                        : Math.abs(percentDiff) <= 2
+                        ? "percent-pill--neutral"
+                        : "percent-pill--higher";
+
+                    return (
+                      <tr
+                        key={`${row.company}-${row.normalizedVehicle}-${row.dateKey}-${row.dropoffDateKey}-${row.price}`}
+                        className={[
+                          row.isElements ? "table-row--elements" : "",
+                          isCheapestCompetitor ? "table-row--cheapest" : "",
+                          highestQuoteRow &&
+                          !row.isElements &&
+                          row.company === highestQuoteRow.company &&
+                          row.vehicle === highestQuoteRow.vehicle &&
+                          row.price === highestQuoteRow.price
+                            ? "table-row--highest"
+                            : ""
+                        ]
+                          .filter(Boolean)
+                          .join(" ")}
+                      >
+                        <td>{row.isElements ? "Elements World" : row.company}</td>
+                        <td>{row.vehicle}</td>
+                        <td>{formatDateLabel(row.dateKey, { year: "numeric" })}</td>
+                        <td>{formatDateLabel(row.dropoffDateKey, { year: "numeric" })}</td>
+                        <td>
+                          {row.durationDays !== null && row.durationDays !== undefined
+                            ? `${row.durationDays}`
+                            : "No data"}
+                        </td>
+                        <td>{formatCurrency(row.price)}</td>
+                        <td>
+                          {row.dailyRate !== null && row.dailyRate !== undefined
+                            ? formatCurrency(row.dailyRate)
+                            : "No data"}
+                        </td>
+                        <td>
+                          {percentDiff === null ? (
+                            "N/A"
+                          ) : (
+                            <span className={`percent-pill ${percentClass}`}>
+                              {percentDiff > 0 ? "+" : ""}
+                              {percentDiff.toFixed(1)}%
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })
                 ) : (
                   <tr>
-                    <td colSpan="7" className="table-empty">
+                    <td colSpan="8" className="table-empty">
                       No competitor data available for selected date
                     </td>
                   </tr>
@@ -3003,16 +3156,47 @@ function App() {
           <div className="scraper-panel__grid">
             <div className="scraper-panel__form">
               <label className="field">
-                <span>Scrape pickup date</span>
-                <input
-                  type="date"
-                  value={scrapePickupDate}
-                  onChange={(event) => setScrapePickupDate(event.target.value)}
-                />
+                <span>Pickup start date</span>
+                <div style={{ position: "relative" }}>
+                  <input
+                    type="text"
+                    value={formatDisplayDate(scrapePickupDate)}
+                    readOnly
+                    onClick={() => openNativeDatePicker(scrapePickupDateInputRef)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        openNativeDatePicker(scrapePickupDateInputRef);
+                      }
+                    }}
+                    style={{
+                      width: "100%",
+                      padding: "10px",
+                      borderRadius: "8px",
+                      border: "1px solid #ccc",
+                      cursor: "pointer"
+                    }}
+                  />
+                  <input
+                    ref={scrapePickupDateInputRef}
+                    type="date"
+                    value={scrapePickupDate}
+                    onChange={(event) => setScrapePickupDate(event.target.value)}
+                    style={{
+                      position: "absolute",
+                      top: 0,
+                      left: 0,
+                      opacity: 0,
+                      width: 1,
+                      height: 1,
+                      pointerEvents: "none"
+                    }}
+                  />
+                </div>
               </label>
 
               <label className="field">
-                <span>Max trip days</span>
+                <span>Pickup window (days)</span>
                 <input
                   type="number"
                   min="1"
@@ -3042,7 +3226,7 @@ function App() {
                     checked={scrapeHeadless}
                     onChange={(event) => setScrapeHeadless(event.target.checked)}
                   />
-                  <span>Headless browser</span>
+                  <span>Run in background (faster)</span>
                 </label>
               </div>
 
@@ -3050,7 +3234,7 @@ function App() {
                 <button
                   type="button"
                   className="action-button"
-                  disabled={scrapeSubmitting || !scrapeLocations.length}
+                  disabled={isScrapeRunActive || !scrapeLocations.length}
                   onClick={() => triggerScrape()}
                 >
                   Run selected scrape
@@ -3058,10 +3242,10 @@ function App() {
                 <button
                   type="button"
                   className="action-button action-button--ghost"
-                  disabled={scrapeSubmitting}
+                  disabled={isScrapeRunActive}
                   onClick={() => triggerScrape(["auckland", "christchurch"])}
                 >
-                  Run both depots
+                  Run both depots (Auckland + Christchurch)
                 </button>
                 <button
                   type="button"
@@ -3070,6 +3254,20 @@ function App() {
                 >
                   Refresh dashboard data
                 </button>
+              </div>
+
+              <div className="scraper-panel__status">
+                {scrapeRunFeedback ? <p className="scraper-panel__hint">{scrapeRunFeedback}</p> : null}
+                {latestRun ? (
+                  <p className="scraper-panel__hint">
+                    Run ID: {latestRun.id} · Status: {runStatusLabel}
+                  </p>
+                ) : null}
+                {isScrapeRunActive ? (
+                  <p className="scraper-panel__hint">
+                    Running...
+                  </p>
+                ) : null}
               </div>
 
               {scraperStatus.error ? (
@@ -3117,6 +3315,9 @@ function App() {
                 <span>Rows inserted this run</span>
                 <strong>{formatCount(latestRun?.rowsInserted || 0)}</strong>
               </div>
+              {rowsInsertedMessage ? (
+                <p className="scraper-panel__hint">{rowsInsertedMessage}</p>
+              ) : null}
 
               <div className="scraper-panel__links">
                 <a href={`${SCRAPER_API_BASE}/api/health`} target="_blank" rel="noreferrer">
@@ -3144,6 +3345,7 @@ function App() {
 }
 
 export default App;
+
 
 
 
