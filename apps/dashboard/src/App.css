@@ -389,6 +389,21 @@
   color: rgba(248, 245, 238, 0.82);
 }
 
+.stat-card--recommended {
+  background: linear-gradient(180deg, rgba(28, 117, 76, 0.97), rgba(20, 88, 57, 0.95));
+  color: #f8f5ee;
+  min-height: 176px;
+}
+
+.stat-card--recommended .stat-card__label,
+.stat-card--recommended .stat-card__detail {
+  color: rgba(248, 245, 238, 0.9);
+}
+
+.stat-card--recommended .stat-card__value {
+  font-size: 1.85rem;
+}
+
 .stat-card--amber {
   background: linear-gradient(180deg, rgba(247, 226, 196, 0.96), rgba(252, 239, 220, 0.95));
 }
@@ -715,6 +730,13 @@
   font-size: 1.05rem;
 }
 
+.scraper-panel__last-run {
+  padding: 0.8rem 1rem;
+  border-radius: 14px;
+  background: rgba(230, 244, 234, 0.72);
+  border: 1px solid rgba(46, 125, 50, 0.22);
+}
+
 .scraper-panel__links {
   display: flex;
   flex-wrap: wrap;
@@ -770,6 +792,19 @@ tbody tr:hover {
 
 .table-row--highest {
   background: rgba(201, 108, 52, 0.14);
+}
+
+.cheapest-badge {
+  display: inline-block;
+  margin-left: 0.45rem;
+  padding: 0.12rem 0.42rem;
+  border-radius: 999px;
+  background: rgba(46, 125, 50, 0.2);
+  color: #1b5e20;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
 }
 
 .table-empty {

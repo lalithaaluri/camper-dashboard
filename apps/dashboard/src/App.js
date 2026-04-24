@@ -2268,20 +2268,26 @@ function App() {
       : cheapestCompetitor === highestCompetitor
       ? `Market price: ${formatCurrency(cheapestCompetitor)}`
       : `Market price range: ${formatCurrency(cheapestCompetitor)} - ${formatCurrency(highestCompetitor)}`;
-  const priceSpread =
-    highestCompetitor !== null &&
-    highestCompetitor !== undefined &&
-    cheapestCompetitor !== null &&
-    cheapestCompetitor !== undefined
-      ? highestCompetitor - cheapestCompetitor
+  const confidenceMessage =
+    competitorPrices.length <= 1
+      ? "Limited market data - only 1 competitor available"
+      : `High confidence (${competitorPrices.length} competitors)`;
+  const recommendedDelta =
+    recommendedPrice !== null && hasElementsPrice ? recommendedPrice - Number(elementsPrice) : null;
+  const recommendedDeltaPercent =
+    recommendedDelta !== null && hasElementsPrice && Number(elementsPrice) !== 0
+      ? (recommendedDelta / Number(elementsPrice)) * 100
       : null;
-  const confidenceTier =
-    competitorPrices.length >= 3 && priceSpread !== null && priceSpread < 800
-      ? "High"
-      : competitorPrices.length >= 2
-      ? "Medium"
-      : "Low";
-  const confidenceLevel = `${confidenceTier} confidence (${competitorPrices.length} competitors)`;
+  const recommendedActionText =
+    recommendedPrice === null
+      ? "No recommendation available"
+      : recommendedDelta === null || Math.abs(recommendedDelta) < 0.5
+      ? `Maintain price at ${formatCurrency(recommendedPrice)} (0.0%)`
+      : `${recommendedDelta > 0 ? "Increase" : "Decrease"} price to ${formatCurrency(
+          recommendedPrice
+        )} (${recommendedDeltaPercent > 0 ? "+" : ""}${formatPercentValue(
+          recommendedDeltaPercent
+        )})`;
   const monthlyMarketAverages = Array.from(
     dashboard.trend.reduce((accumulator, item) => {
       const key = String(item.dateKey || "").slice(0, 7);
@@ -2501,10 +2507,10 @@ function App() {
       <main className="dashboard">
         <section className="hero-panel">
           <div className="hero-copy">
-            <span className="eyebrow">Camper revenue cockpit</span>
-            <h1>Modern pricing visibility for every road-trip class.</h1>
+            <span className="eyebrow">AI-assisted pricing platform</span>
+            <h1>AI-Assisted Pricing Decision Support</h1>
             <p className="hero-copy__subtle">
-              Practical, market-aware guidance for faster pricing decisions.
+              Competitor pricing analysis and real-time insights to support pricing decisions
             </p>
             <p>
               Track how {activeConfig.label.toLowerCase()} sits against the market,
@@ -2719,9 +2725,11 @@ function App() {
             label="Elements Price"
             value={formatCurrency(exactTripMetrics.totalPrice)}
             detail={
-              exactTripMetrics.hasExactMatch
-                ? "Your current selling price vs market avg"
-                : "Select pickup and dropoff to see your current selling price"
+              pricingDiffPercent === null
+                ? "vs market avg: Not available"
+                : `vs market avg: ${pricingDiffPercent > 0 ? "+" : ""}${formatPercentValue(
+                    pricingDiffPercent
+                  )}`
             }
             tone="forest"
           />
@@ -2748,12 +2756,12 @@ function App() {
             tone="canyon"
           />
           <StatCard
-            label="Recommended rate"
+            label="💡 Recommended price"
             value={
               recommendedPrice === null ? "N/A" : formatCurrency(recommendedPrice)
             }
-            detail={recommendationReasonMessage}
-            tone="pine"
+            detail="AI suggestion based on current market baseline"
+            tone="recommended"
           />
             <StatCard
               label="Lowest market (competitor) price"
@@ -2870,18 +2878,19 @@ function App() {
           </div>
           <div className="decision-list">
             <div>
-              <span>Price positioning</span>
-              <strong>{pricingPositioningInsight}</strong>
+              <span>RECOMMENDED ACTION</span>
+              <strong className={`action-badge action-badge--${actionTone}`}>{recommendedActionText}</strong>
+              <small>
+                Expected uplift:{" "}
+                {recommendedDelta === null
+                  ? "N/A"
+                  : `${recommendedDelta >= 0 ? "+" : ""}${formatCurrency(recommendedDelta)}`}
+              </small>
+              <small>Confidence: {confidenceMessage}</small>
             </div>
             <div>
-              <span>Recommended action</span>
-              <strong className={`action-badge action-badge--${actionTone}`}>
-                {actionTone === "up"
-                  ? `↑ ${recommendedActionInsight}`
-                  : actionTone === "down"
-                  ? `↓ ${recommendedActionInsight}`
-                  : recommendedActionInsight}
-              </strong>
+              <span>Price positioning</span>
+              <strong>{pricingPositioningInsight}</strong>
             </div>
             <div>
               <span>Market range</span>
@@ -2889,8 +2898,8 @@ function App() {
             </div>
             <div>
               <span>Confidence level</span>
-              <strong>{confidenceLevel}</strong>
-              <small>Confidence is based on number of competitors and data consistency</small>
+              <strong>{confidenceMessage}</strong>
+              <small>Confidence is based on market coverage for this date pair</small>
             </div>
             <div>
               <span>Trend insight</span>
@@ -3080,7 +3089,12 @@ function App() {
                           .join(" ")}
                       >
                         <td>{row.isElements ? "Elements World" : row.company}</td>
-                        <td>{row.vehicle}</td>
+                        <td>
+                          {row.vehicle}{" "}
+                          {isCheapestCompetitor ? (
+                            <span className="cheapest-badge">Cheapest</span>
+                          ) : null}
+                        </td>
                         <td>{formatDateLabel(row.dateKey, { year: "numeric" })}</td>
                         <td>{formatDateLabel(row.dropoffDateKey, { year: "numeric" })}</td>
                         <td>
@@ -3237,7 +3251,7 @@ function App() {
                   disabled={isScrapeRunActive || !scrapeLocations.length}
                   onClick={() => triggerScrape()}
                 >
-                  Run selected scrape
+                  Run price update
                 </button>
                 <button
                   type="button"
@@ -3245,14 +3259,14 @@ function App() {
                   disabled={isScrapeRunActive}
                   onClick={() => triggerScrape(["auckland", "christchurch"])}
                 >
-                  Run both depots (Auckland + Christchurch)
+                  Run for all locations
                 </button>
                 <button
                   type="button"
                   className="action-button action-button--ghost"
                   onClick={refreshDataset}
                 >
-                  Refresh dashboard data
+                  Sync latest data
                 </button>
               </div>
 
@@ -3260,12 +3274,14 @@ function App() {
                 {scrapeRunFeedback ? <p className="scraper-panel__hint">{scrapeRunFeedback}</p> : null}
                 {latestRun ? (
                   <p className="scraper-panel__hint">
-                    Run ID: {latestRun.id} · Status: {runStatusLabel}
+                    Run ID: {latestRun.id} | Status: {runStatusLabel}
                   </p>
                 ) : null}
                 {isScrapeRunActive ? (
                   <p className="scraper-panel__hint">
-                    Running...
+                    Scraper running... Rows processed:{" "}
+                    {formatCount(latestRun?.rowsProcessed || latestRun?.rowsCaptured || 0)} | Dates visited:{" "}
+                    {formatCount(latestRun?.datesVisited || 0)}
                   </p>
                 ) : null}
               </div>
@@ -3315,8 +3331,20 @@ function App() {
                 <span>Rows inserted this run</span>
                 <strong>{formatCount(latestRun?.rowsInserted || 0)}</strong>
               </div>
+              <div className="scraper-panel__last-run">
+                <p className="scraper-panel__hint">
+                  Last run: {latestRun?.status === "completed" ? "Completed" : runStatusLabel}
+                </p>
+                <p className="scraper-panel__hint">
+                  New rows: {formatCount(latestRun?.rowsInserted || 0)}
+                </p>
+              </div>
               {rowsInsertedMessage ? (
-                <p className="scraper-panel__hint">{rowsInsertedMessage}</p>
+                <p className="scraper-panel__hint">
+                  {Number(latestRun?.rowsInserted || 0) === 0
+                    ? "No new rows inserted (data already exists for this date range)"
+                    : rowsInsertedMessage}
+                </p>
               ) : null}
 
               <div className="scraper-panel__links">
@@ -3345,6 +3373,8 @@ function App() {
 }
 
 export default App;
+
+
 
 
 

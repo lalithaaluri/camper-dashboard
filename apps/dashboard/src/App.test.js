@@ -183,9 +183,9 @@ test("renders camper revenue dashboard", async () => {
   render(<App />);
 
   expect(
-    await screen.findByText(/modern pricing visibility for every road-trip class/i)
+    await screen.findByText(/ai-assisted pricing decision support/i)
   ).toBeInTheDocument();
-  expect(screen.getByText(/recommended rate/i)).toBeInTheDocument();
+  expect(screen.getByText(/recommended price/i)).toBeInTheDocument();
   expect(screen.getByRole("link", { name: /view latest data/i })).toHaveAttribute(
     "href",
     "http://localhost:4302/api/prices"
