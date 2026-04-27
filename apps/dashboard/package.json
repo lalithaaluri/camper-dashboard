@@ -27,6 +27,7 @@
     "start": "react-scripts start",
     "build": "react-scripts build",
     "test": "react-scripts test --watch=false",
+    "test:e2e": "playwright test tests/dashboard.spec.ts --tsconfig=tsconfig.playwright.json",
     "lint": "echo \"Dashboard lint not configured\""
   },
   "eslintConfig": {
@@ -46,5 +47,8 @@
       "last 1 firefox version",
       "last 1 safari version"
     ]
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.59.1"
   }
 }
