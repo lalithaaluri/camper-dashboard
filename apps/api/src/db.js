@@ -13,6 +13,7 @@ const initializeSchema = (database) => {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       pickup_date TEXT,
       dropoff_date TEXT,
+      -- TODO(cross-location): replace single location with pickup_location + dropoff_location.
       location TEXT,
       company TEXT,
       vehicle TEXT,
@@ -21,6 +22,16 @@ const initializeSchema = (database) => {
       type TEXT
     );
   `);
+
+  const columns = database.prepare(`PRAGMA table_info(pricing_data)`).all();
+  const columnNames = new Set(columns.map((column) => column.name));
+
+  if (!columnNames.has("pickup_location")) {
+    database.exec(`ALTER TABLE pricing_data ADD COLUMN pickup_location TEXT`);
+  }
+  if (!columnNames.has("dropoff_location")) {
+    database.exec(`ALTER TABLE pricing_data ADD COLUMN dropoff_location TEXT`);
+  }
 };
 
 const getDb = () => {

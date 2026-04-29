@@ -48,12 +48,14 @@ const importCsvToDb = async (customCsvPath) => {
       pickup_date,
       dropoff_date,
       location,
+      pickup_location,
+      dropoff_location,
       company,
       vehicle,
       price,
       scrape_date,
       type
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
   `);
   const insertBatch = db.transaction((rows) => {
     for (const row of rows) {
@@ -90,6 +92,8 @@ const importCsvToDb = async (customCsvPath) => {
           normalizeString(row.pickup_date),
           normalizeString(row.dropoff_date),
           normalizeString(row.location),
+          normalizeString(row.pickup_location || row.location),
+          normalizeString(row.dropoff_location || row.location),
           normalizeString(row.company),
           normalizeString(row.vehicle),
           price,

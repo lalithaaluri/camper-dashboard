@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AxisBottom, AxisLeft } from "@visx/axis";
 import { curveMonotoneX } from "@visx/curve";
 import { LinearGradient } from "@visx/gradient";
@@ -70,6 +70,33 @@ const locationOptions = [
   { value: "", label: "All depots" },
   { value: "auckland", label: "Auckland" },
   { value: "christchurch", label: "Christchurch" }
+];
+const routeLocationOptions = [
+  { value: "", label: "Same as Pick Up" },
+  { value: "auckland", label: "Auckland" },
+  { value: "christchurch", label: "Christchurch" }
+];
+const scrapeRouteOptions = [
+  {
+    value: "auckland->auckland",
+    label: "Auckland -> Auckland",
+    locations: ["auckland"]
+  },
+  {
+    value: "christchurch->christchurch",
+    label: "Christchurch -> Christchurch",
+    locations: ["christchurch"]
+  },
+  {
+    value: "auckland->christchurch",
+    label: "Auckland -> Christchurch",
+    locations: ["auckland", "christchurch"]
+  },
+  {
+    value: "christchurch->auckland",
+    label: "Christchurch -> Auckland",
+    locations: ["christchurch", "auckland"]
+  }
 ];
 
 const initialDashboard = {
@@ -325,7 +352,8 @@ export const selectLatestRowsBySnapshot = (rows) => {
     const key = [
       row.dateKey,
       row.dropoffDate,
-      row.location,
+      row.pickupLocation || row.location,
+      row.dropoffLocation || row.location,
       row.company,
       row.vehicle,
       row.type,
@@ -347,6 +375,8 @@ const buildDuplicateQuoteKey = (row) =>
     normalizeVehicleName(row.vehicle),
     row.dateKey,
     row.dropoffDateKey,
+    row.pickupLocation || row.location,
+    row.dropoffLocation || row.location,
     row.price
   ].join("|");
 
@@ -1783,6 +1813,10 @@ function App() {
   const [vehicle, setVehicle] = useState("");
   const [adjustment, setAdjustment] = useState(5);
   const [location, setLocation] = useState("");
+  const [pendingPickupLocation, setPendingPickupLocation] = useState("auckland");
+  const [pendingDropoffLocation, setPendingDropoffLocation] = useState("");
+  const [appliedPickupLocation, setAppliedPickupLocation] = useState("auckland");
+  const [appliedDropoffLocation, setAppliedDropoffLocation] = useState("");
   const [selectedDate, setSelectedDate] = useState("");
   const [selectedDropoff, setSelectedDropoff] = useState("");
   const [isDropoffUserSelected, setIsDropoffUserSelected] = useState(false);
@@ -1794,9 +1828,11 @@ function App() {
     new Date().toISOString().slice(0, 10)
   );
   const [scrapeMaxTripDays, setScrapeMaxTripDays] = useState(30);
-  const [scrapeLocations, setScrapeLocations] = useState([
-    "auckland",
-    "christchurch"
+  const [scrapeRoutes, setScrapeRoutes] = useState([
+    "auckland->auckland",
+    "christchurch->christchurch",
+    "auckland->christchurch",
+    "christchurch->auckland"
   ]);
   const [scrapeHeadless, setScrapeHeadless] = useState(true);
   const [scrapeSubmitting, setScrapeSubmitting] = useState(false);
@@ -1806,9 +1842,21 @@ function App() {
   const pickupDateInputRef = useRef(null);
   const dropoffDateInputRef = useRef(null);
   const scrapePickupDateInputRef = useRef(null);
+
+  const selectedLocationForLegacyFilters = appliedPickupLocation || location;
+  const routeLabel =
+    appliedPickupLocation && appliedDropoffLocation
+      ? `${appliedPickupLocation} -> ${appliedDropoffLocation}`
+      : location || "All depots";
   const lastAutoRefreshedRunIdRef = useRef(null);
   const pickupDate = selectedDate;
   const dropoffDate = selectedDropoff;
+  const scrapeLocations = useMemo(() => {
+    const selectedRouteLocations = scrapeRouteOptions
+      .filter((option) => scrapeRoutes.includes(option.value))
+      .flatMap((option) => option.locations);
+    return Array.from(new Set(selectedRouteLocations));
+  }, [scrapeRoutes]);
   const handlePickupDateChange = (event) => {
     setSelectedDate(event.target.value);
     setIsDropoffUserSelected(false);
@@ -1816,6 +1864,20 @@ function App() {
   const handleDropoffDateChange = (event) => {
     setSelectedDropoff(event.target.value);
     setIsDropoffUserSelected(true);
+  };
+  const handlePickupLocationChange = (event) => {
+    const nextPickupLocation = event.target.value;
+    setPendingPickupLocation(nextPickupLocation);
+    if (!pendingDropoffLocation) {
+      setAppliedPickupLocation(nextPickupLocation);
+      setAppliedDropoffLocation("");
+    }
+  };
+  const handleDropoffLocationChange = (event) => {
+    const nextDropoffLocation = event.target.value;
+    setPendingDropoffLocation(nextDropoffLocation);
+    setAppliedPickupLocation(pendingPickupLocation);
+    setAppliedDropoffLocation(nextDropoffLocation);
   };
   const openNativeDatePicker = (inputRef) => {
     const input = inputRef.current;
@@ -1841,6 +1903,15 @@ function App() {
   };
 
   useEffect(() => {
+    if (appliedPickupLocation) {
+      setLocation(appliedPickupLocation);
+      return;
+    }
+
+    setLocation("");
+  }, [appliedPickupLocation]);
+
+  useEffect(() => {
     let cancelled = false;
     let activeController = null;
 
@@ -1852,8 +1923,16 @@ function App() {
       activeController = controller;
 
       try {
-        const pricesUrl = `${PRICING_API_BASE}/api/prices/latest`;
-        const trendsUrl = `${PRICING_API_BASE}/api/prices`;
+        const queryParams = new URLSearchParams();
+        if (appliedPickupLocation) {
+          queryParams.set("pickup_location", appliedPickupLocation);
+        }
+        if (appliedDropoffLocation) {
+          queryParams.set("dropoff_location", appliedDropoffLocation);
+        }
+        const query = queryParams.toString() ? `?${queryParams.toString()}` : "";
+        const pricesUrl = `${PRICING_API_BASE}/api/prices/latest${query}`;
+        const trendsUrl = `${PRICING_API_BASE}/api/prices${query}`;
 
         const [pricesResponse, trendsResponse] = await Promise.all([
           fetch(pricesUrl, { signal: controller.signal }),
@@ -1897,6 +1976,8 @@ function App() {
                 company: normalize(row.company),
                 vehicle: normalizeVehicle(row.vehicle),
                 location: normalize(row.location),
+                pickupLocation: normalize(row.pickup_location || row.location),
+                dropoffLocation: normalize(row.dropoff_location || row.location),
                 type: normalize(row.type),
                 price,
                 tripDays: calculateTripDays(dateObject, dropoffObject),
@@ -1938,7 +2019,7 @@ function App() {
       }
       window.clearInterval(timer);
     };
-  }, [dataReloadTrigger]);
+  }, [dataReloadTrigger, appliedPickupLocation, appliedDropoffLocation]);
 
   useEffect(() => {
     if (!loading) {
@@ -2023,14 +2104,14 @@ function App() {
     const relevantRows = [];
 
     rows.forEach((row) => {
-      if (location && row.location !== location) {
+      if (selectedLocationForLegacyFilters && row.location !== selectedLocationForLegacyFilters) {
         return;
       }
 
       relevantRows.push(row);
     });
     console.log("FILTERED DATA:", relevantRows.length);
-    console.log("Filters:", vehicle, location, [selectedDate, selectedDropoff]);
+    console.log("Filters:", vehicle, selectedLocationForLegacyFilters, [selectedDate, selectedDropoff]);
 
     setDashboard(
       buildDashboardFromRows({
@@ -2041,7 +2122,7 @@ function App() {
         selectedVehicle: vehicle
       })
     );
-  }, [adjustment, location, rows, selectedDate, vehicle]);
+  }, [adjustment, selectedLocationForLegacyFilters, rows, selectedDate, selectedDropoff, vehicle]);
 
   useEffect(() => {
     if (!trendData.length) {
@@ -2058,14 +2139,14 @@ function App() {
     const relevantTrendRows = [];
 
     trendData.forEach((row) => {
-      if (location && row.location !== location) {
+      if (selectedLocationForLegacyFilters && row.location !== selectedLocationForLegacyFilters) {
         return;
       }
 
       relevantTrendRows.push(row);
     });
     console.log("FILTERED DATA:", relevantTrendRows.length);
-    console.log("Filters:", vehicle, location, [selectedDate, selectedDropoff]);
+    console.log("Filters:", vehicle, selectedLocationForLegacyFilters, [selectedDate, selectedDropoff]);
 
     setTrendDashboard(
       buildDashboardFromRows({
@@ -2076,7 +2157,7 @@ function App() {
         selectedVehicle: vehicle
       })
     );
-  }, [adjustment, location, trendData, selectedDate, vehicle]);
+  }, [adjustment, selectedLocationForLegacyFilters, trendData, selectedDate, selectedDropoff, vehicle]);
 
   const dropoffOptions = Array.from(
     new Set(
@@ -2148,14 +2229,14 @@ function App() {
     selectedPickup: selectedDate,
     selectedDropoff,
     selectedVehicle: vehicle,
-    selectedLocation: location
+    selectedLocation: selectedLocationForLegacyFilters
   });
   const competitorQuoteSnapshot = buildCompetitorQuoteSnapshot({
     rows,
     selectedPickup: selectedDate,
     selectedDropoff,
     selectedVehicle: vehicle,
-    selectedLocation: location
+    selectedLocation: selectedLocationForLegacyFilters
   });
   const elementsRow = exactTripMetrics.selectedRow;
   const quoteTableRows = buildQuoteTableRows({
@@ -2437,11 +2518,11 @@ function App() {
     );
   }
 
-  const toggleScrapeLocation = (nextLocation) => {
-    setScrapeLocations((current) =>
-      current.includes(nextLocation)
-        ? current.filter((entry) => entry !== nextLocation)
-        : [...current, nextLocation]
+  const toggleScrapeRoute = (nextRoute) => {
+    setScrapeRoutes((current) =>
+      current.includes(nextRoute)
+        ? current.filter((entry) => entry !== nextRoute)
+        : [...current, nextRoute]
     );
   };
 
@@ -2525,7 +2606,7 @@ function App() {
               </div>
               <div>
                 <span className="hero-metadata__label">Market focus</span>
-                <strong>{location || "All depots"}</strong>
+                <strong>{routeLabel}</strong>
               </div>
             </div>
           </div>
@@ -2576,10 +2657,23 @@ function App() {
 
           <div className="control-panel__grid">
             <label className="field">
-              <span>Depot</span>
-              <select value={location} onChange={(event) => setLocation(event.target.value)}>
-                {locationOptions.map((option) => (
+              <span>Pickup location</span>
+              <select value={pendingPickupLocation} onChange={handlePickupLocationChange}>
+                {routeLocationOptions
+                  .filter((option) => option.value)
+                  .map((option) => (
                   <option key={option.value || "all"} value={option.value}>
+                    {option.label}
+                  </option>
+                  ))}
+              </select>
+            </label>
+
+            <label className="field">
+              <span>Dropoff location</span>
+              <select value={pendingDropoffLocation} onChange={handleDropoffLocationChange}>
+                {routeLocationOptions.map((option) => (
+                  <option key={`dropoff-${option.value || "all"}`} value={option.value}>
                     {option.label}
                   </option>
                 ))}
@@ -2831,7 +2925,7 @@ function App() {
                 <h2>{dashboard.latestDateLabel}</h2>
                 <p>
                   Data is rolling up from pickup-date observations in{" "}
-                  {location || "both depots"}, with the latest viable competitor set used for
+                  {routeLabel || "both depots"}, with the latest viable competitor set used for
                   the recommendation snapshot.
                 </p>
               </article>
@@ -3168,87 +3262,127 @@ function App() {
           </div>
 
           <div className="scraper-panel__grid">
-            <div className="scraper-panel__form">
-              <label className="field">
-                <span>Pickup start date</span>
-                <div style={{ position: "relative" }}>
-                  <input
-                    type="text"
-                    value={formatDisplayDate(scrapePickupDate)}
-                    readOnly
-                    onClick={() => openNativeDatePicker(scrapePickupDateInputRef)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") {
-                        event.preventDefault();
-                        openNativeDatePicker(scrapePickupDateInputRef);
-                      }
-                    }}
-                    style={{
-                      width: "100%",
-                      padding: "10px",
-                      borderRadius: "8px",
-                      border: "1px solid #ccc",
-                      cursor: "pointer"
-                    }}
-                  />
-                  <input
-                    ref={scrapePickupDateInputRef}
-                    type="date"
-                    value={scrapePickupDate}
-                    onChange={(event) => setScrapePickupDate(event.target.value)}
-                    style={{
-                      position: "absolute",
-                      top: 0,
-                      left: 0,
-                      opacity: 0,
-                      width: 1,
-                      height: 1,
-                      pointerEvents: "none"
-                    }}
-                  />
-                </div>
-              </label>
-
-              <label className="field">
-                <span>Pickup window (days)</span>
-                <input
-                  type="number"
-                  min="1"
-                  max="30"
-                  value={scrapeMaxTripDays}
-                  onChange={(event) => setScrapeMaxTripDays(Number(event.target.value))}
-                />
-              </label>
-
-              <div className="scraper-panel__checkboxes">
-                {locationOptions
-                  .filter((entry) => entry.value)
-                  .map((entry) => (
-                    <label key={entry.value} className="toggle-pill">
+            <div className="scraper-panel__form" style={{ display: "grid", gap: "16px" }}>
+              <div
+                style={{
+                  display: "grid",
+                  gap: "12px",
+                  padding: "14px",
+                  borderRadius: "14px",
+                  border: "1px solid rgba(18, 33, 64, 0.12)",
+                  background: "rgba(255, 255, 255, 0.7)"
+                }}
+              >
+                <div style={{ display: "grid", gap: "10px", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}>
+                  <label className="field">
+                    <span>Pickup start date</span>
+                    <div style={{ position: "relative" }}>
                       <input
-                        type="checkbox"
-                        checked={scrapeLocations.includes(entry.value)}
-                        onChange={() => toggleScrapeLocation(entry.value)}
+                        type="text"
+                        value={formatDisplayDate(scrapePickupDate)}
+                        readOnly
+                        onClick={() => openNativeDatePicker(scrapePickupDateInputRef)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault();
+                            openNativeDatePicker(scrapePickupDateInputRef);
+                          }
+                        }}
+                        style={{
+                          width: "100%",
+                          padding: "10px",
+                          borderRadius: "8px",
+                          border: "1px solid #ccc",
+                          cursor: "pointer"
+                        }}
                       />
-                      <span>{entry.label}</span>
-                    </label>
-                  ))}
+                      <input
+                        ref={scrapePickupDateInputRef}
+                        type="date"
+                        value={scrapePickupDate}
+                        onChange={(event) => setScrapePickupDate(event.target.value)}
+                        style={{
+                          position: "absolute",
+                          top: 0,
+                          left: 0,
+                          opacity: 0,
+                          width: 1,
+                          height: 1,
+                          pointerEvents: "none"
+                        }}
+                      />
+                    </div>
+                  </label>
 
-                <label className="toggle-pill">
-                  <input
-                    type="checkbox"
-                    checked={scrapeHeadless}
-                    onChange={(event) => setScrapeHeadless(event.target.checked)}
-                  />
-                  <span>Run in background (faster)</span>
-                </label>
+                  <label className="field">
+                    <span>Pickup window (days)</span>
+                    <input
+                      type="number"
+                      min="1"
+                      max="30"
+                      value={scrapeMaxTripDays}
+                      onChange={(event) => setScrapeMaxTripDays(Number(event.target.value))}
+                    />
+                  </label>
+                </div>
+
+                <div style={{ display: "grid", gap: "8px" }}>
+                  <span className="control-panel__label">Route selection</span>
+                  <div className="chip-row" style={{ gap: "10px" }}>
+                    {scrapeRouteOptions.map((entry) => {
+                      const selected = scrapeRoutes.includes(entry.value);
+                      return (
+                        <label
+                          key={entry.value}
+                          className="toggle-pill"
+                          style={{
+                            position: "relative",
+                            minHeight: "38px",
+                            display: "inline-flex",
+                            alignItems: "center",
+                            padding: "8px 14px",
+                            borderRadius: "999px",
+                            border: selected ? "1px solid rgba(17, 56, 112, 0.85)" : "1px solid rgba(18, 33, 64, 0.22)",
+                            background: selected ? "rgba(17, 56, 112, 0.1)" : "rgba(255, 255, 255, 0.8)",
+                            cursor: "pointer"
+                          }}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={selected}
+                            onChange={() => toggleScrapeRoute(entry.value)}
+                            style={{
+                              position: "absolute",
+                              opacity: 0,
+                              width: 1,
+                              height: 1,
+                              pointerEvents: "none"
+                            }}
+                          />
+                          <span style={{ fontWeight: 600 }}>{entry.label}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="scraper-panel__checkboxes">
+                  <label className="toggle-pill">
+                    <input
+                      type="checkbox"
+                      checked={scrapeHeadless}
+                      onChange={(event) => setScrapeHeadless(event.target.checked)}
+                    />
+                    <span>Run in background (faster)</span>
+                  </label>
+                </div>
               </div>
 
-              <div className="scraper-panel__actions">
+              <div className="scraper-panel__actions" style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
                 <button
                   type="button"
                   className="action-button"
-                  disabled={isScrapeRunActive || !scrapeLocations.length}
+                  disabled={isScrapeRunActive || !scrapeRoutes.length}
                   onClick={() => triggerScrape()}
                 >
                   Run price update

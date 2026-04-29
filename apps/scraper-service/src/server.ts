@@ -17,12 +17,17 @@ import {
   writeDataset,
   writeRunArtifact
 } from "./storage.js";
-import type { DepotCode, RunSummary, ScrapeRequest } from "./types.js";
+import type { DepotCode, RoutePair, RunSummary, ScrapeRequest } from "./types.js";
 
 const app = express();
 const port = Number(process.env.PORT || 4301);
 let activeRunId: string | null = null;
 const AUTO_RUN = false;
+const depotSchema = z.enum(["auckland", "christchurch"]);
+const routePairSchema = z.object({
+  pickupLocation: depotSchema,
+  dropoffLocation: depotSchema
+});
 
 const shouldWriteCsvBackup = () => {
   const value = (process.env.SCRAPER_WRITE_CSV_BACKUP ?? "").trim().toLowerCase();
@@ -31,9 +36,17 @@ const shouldWriteCsvBackup = () => {
 
 const scrapeRequestSchema = z.object({
   pickupDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  locations: z.array(z.enum(["auckland", "christchurch"])).min(1),
+  locations: z.array(depotSchema).default([]),
+  routePairs: z.array(routePairSchema).default([]),
   maxTripDays: z.number().int().min(1).max(31).default(3),
   headless: z.boolean().default(true)
+}).superRefine((value, ctx) => {
+  if (value.locations.length === 0 && value.routePairs.length === 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Provide at least one location or one route pair."
+    });
+  }
 });
 
 const createRunSummary = (request: ScrapeRequest): RunSummary => {
@@ -46,6 +59,7 @@ const createRunSummary = (request: ScrapeRequest): RunSummary => {
     updatedAt: timestamp,
     pickupDate: request.pickupDate,
     locations: request.locations,
+    routePairs: request.routePairs,
     maxTripDays: request.maxTripDays,
     headless: request.headless,
     rowsCaptured: 0,
@@ -68,7 +82,21 @@ const normalizeRequest = (body: unknown): ScrapeRequest => {
         : 3
   });
 
-  return parsed;
+  const dedupedLocations = Array.from(new Set(parsed.locations));
+  const dedupedRoutePairs = Array.from(
+    new Map(
+      parsed.routePairs.map((pair) => [
+        `${pair.pickupLocation}|${pair.dropoffLocation}`,
+        pair
+      ])
+    ).values()
+  ) as RoutePair[];
+
+  return {
+    ...parsed,
+    locations: dedupedLocations,
+    routePairs: dedupedRoutePairs
+  };
 };
 
 app.use(cors());
@@ -189,6 +217,7 @@ app.post("/api/fix-trek-june-auckland", async (req, res) => {
       {
         pickupDate: "2026-06-01",
         locations: ["auckland"],
+        routePairs: [],
         maxTripDays: 3,
         headless: true
       },

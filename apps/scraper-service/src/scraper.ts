@@ -3,7 +3,7 @@ import path from "node:path";
 import { chromium, type Locator, type Page } from "playwright";
 import { BASE_URL, DEPOTS, generateDropoffDates, identifyVehicle } from "./config.js";
 import { paths } from "./storage.js";
-import type { DepotCode, PriceRow, ScrapeRequest, ScrapeRunResult } from "./types.js";
+import type { DepotCode, PriceRow, RoutePair, ScrapeRequest, ScrapeRunResult } from "./types.js";
 
 export function generateCombos(startDate: string, pickupWindow: number) {
   const combos: Array<{ pickupDate: string; dropoffDate: string }> = [];
@@ -53,6 +53,10 @@ const SEARCH_TIMEOUT_MS = 20_000;
 const RESULTS_TIMEOUT_MS = 30_000;
 const SEARCH_FORM_SELECTOR = "form[action='/widget/book/search']";
 const RESULTS_SELECTOR = ".price-label, [class*='price-label']";
+const PHASE_ONE_ALLOWED_CROSS_LOCATION_ROUTES = new Set([
+  "auckland|christchurch",
+  "christchurch|auckland"
+]);
 
 const cleanPrice = (value: string) => {
   const numeric = Number(value.replace(/[^\d.]/g, ""));
@@ -148,11 +152,13 @@ const setSelectizeValue = async (
 
 const fillBookingWidget = async (
   page: Page,
-  depot: DepotCode,
+  pickupDepot: DepotCode,
+  dropoffDepot: DepotCode,
   pickupDate: string,
   dropoffDate: string
 ) => {
-  const pickupLabel = DEPOTS[depot].label;
+  const pickupLabel = DEPOTS[pickupDepot].label;
+  const dropoffLabel = DEPOTS[dropoffDepot].label;
 
   const pickupSet = await setSelectizeValue(
     page,
@@ -162,7 +168,7 @@ const fillBookingWidget = async (
   const dropoffSet = await setSelectizeValue(
     page,
     `${SEARCH_FORM_SELECTOR} select[name="Parameters.LocationTo"]`,
-    pickupLabel,
+    dropoffLabel,
     true
   );
 
@@ -254,7 +260,8 @@ const collectCurrentPageRows = async (
   page: Page,
   pickupDate: string,
   dropoffDate: string,
-  depot: DepotCode,
+  pickupDepot: DepotCode,
+  dropoffDepot: DepotCode,
   scrapeDate: string
 ) => {
   const blocks = page.locator(RESULTS_SELECTOR);
@@ -298,7 +305,9 @@ const collectCurrentPageRows = async (
     rows.push({
       pickup_date: pickupDate,
       dropoff_date: dropoffDate,
-      location: depot,
+      pickup_location: pickupDepot,
+      dropoff_location: dropoffDepot,
+      location: pickupDepot,
       company: match.company,
       vehicle: match.vehicle,
       price,
@@ -348,31 +357,50 @@ const scrapeQuoteSet = async (
   page: Page,
   pickupDate: string,
   dropoffDate: string,
-  depot: DepotCode,
+  pickupDepot: DepotCode,
+  dropoffDepot: DepotCode,
   scrapeDate: string,
   warnings: string[]
 ) => {
-  console.log(`[SCRAPER] Loading page for ${depot} ${pickupDate} -> ${dropoffDate}`);
+  console.log(
+    `[SCRAPER] Loading page for ${pickupDepot}->${dropoffDepot} ${pickupDate} -> ${dropoffDate}`
+  );
   await page.goto(BASE_URL, { waitUntil: "domcontentloaded", timeout: SEARCH_TIMEOUT_MS });
   await dismissOverlays(page);
   await page.locator(SEARCH_FORM_SELECTOR).first().waitFor({ timeout: SEARCH_TIMEOUT_MS });
   console.log("[SCRAPER] Search form loaded");
 
-  const widgetReady = await fillBookingWidget(page, depot, pickupDate, dropoffDate);
+  const widgetReady = await fillBookingWidget(
+    page,
+    pickupDepot,
+    dropoffDepot,
+    pickupDate,
+    dropoffDate
+  );
   const submitted = await submitSearch(page);
 
   if (!widgetReady || !submitted) {
-    warnings.push(`Unable to fully automate the search form for ${depot} ${pickupDate} -> ${dropoffDate}.`);
+    warnings.push(
+      `Unable to fully automate the search form for ${pickupDepot}->${dropoffDepot} ${pickupDate} -> ${dropoffDate}.`
+    );
     await writeFile(
-      path.join(paths.artifactsDir, `failed-form-${depot}-${pickupDate}-${dropoffDate}.html`),
+      path.join(
+        paths.artifactsDir,
+        `failed-form-${pickupDepot}-${dropoffDepot}-${pickupDate}-${dropoffDate}.html`
+      ),
       await page.content(),
       "utf8"
     );
     await page.screenshot({
-      path: path.join(paths.artifactsDir, `failed-form-${depot}-${pickupDate}-${dropoffDate}.png`),
+      path: path.join(
+        paths.artifactsDir,
+        `failed-form-${pickupDepot}-${dropoffDepot}-${pickupDate}-${dropoffDate}.png`
+      ),
       fullPage: true
     }).catch(() => undefined);
-    throw new Error(`Search form automation failed for ${depot} ${pickupDate} -> ${dropoffDate}`);
+    throw new Error(
+      `Search form automation failed for ${pickupDepot}->${dropoffDepot} ${pickupDate} -> ${dropoffDate}`
+    );
   }
 
   console.log("[SCRAPER] Search submitted, waiting for results");
@@ -383,11 +411,20 @@ const scrapeQuoteSet = async (
   const seenPages = new Set<string>();
 
   while (true) {
-    const pageRows = await collectCurrentPageRows(page, pickupDate, dropoffDate, depot, scrapeDate);
+    const pageRows = await collectCurrentPageRows(
+      page,
+      pickupDate,
+      dropoffDate,
+      pickupDepot,
+      dropoffDepot,
+      scrapeDate
+    );
     pageRows.forEach((row) => {
       const key = [
         row.pickup_date,
         row.dropoff_date,
+        row.pickup_location ?? row.location,
+        row.dropoff_location ?? row.location,
         row.location,
         row.company,
         row.vehicle
@@ -411,7 +448,7 @@ const scrapeQuoteSet = async (
   }
 
   console.log("[SCRAPER] Combo summary:", {
-    depot,
+    route: `${pickupDepot}->${dropoffDepot}`,
     pickupDate,
     dropoffDate,
     rows: minimumByKey.size,
@@ -420,6 +457,45 @@ const scrapeQuoteSet = async (
   });
 
   return Array.from(minimumByKey.values());
+};
+
+const resolveRoutePairs = (request: ScrapeRequest): RoutePair[] => {
+  if (request.routePairs.length > 0) {
+    return request.routePairs;
+  }
+
+  return request.locations.map((location) => ({
+    pickupLocation: location,
+    dropoffLocation: location
+  }));
+};
+
+const validatePhaseOneCrossLocationScope = (request: ScrapeRequest, routePairs: RoutePair[]) => {
+  const hasCrossLocation = routePairs.some(
+    (pair) => pair.pickupLocation !== pair.dropoffLocation
+  );
+
+  if (!hasCrossLocation) {
+    return;
+  }
+
+  const pickupMonth = request.pickupDate.slice(5, 7);
+  if (pickupMonth !== "06") {
+    throw new Error("Phase 1 cross-location scraping is limited to June pickup dates.");
+  }
+
+  for (const pair of routePairs) {
+    if (pair.pickupLocation === pair.dropoffLocation) {
+      continue;
+    }
+
+    const key = `${pair.pickupLocation}|${pair.dropoffLocation}`;
+    if (!PHASE_ONE_ALLOWED_CROSS_LOCATION_ROUTES.has(key)) {
+      throw new Error(
+        `Unsupported cross-location route for Phase 1: ${pair.pickupLocation}->${pair.dropoffLocation}`
+      );
+    }
+  }
 };
 
 export const runAutomatedScrape = async (
@@ -435,6 +511,7 @@ export const runAutomatedScrape = async (
     runId,
     pickupDate: request.pickupDate,
     locations: request.locations,
+    routePairs: request.routePairs,
     maxTripDays: request.maxTripDays,
     headless: request.headless
   });
@@ -446,9 +523,11 @@ export const runAutomatedScrape = async (
   const warnings: string[] = [];
   const rows: PriceRow[] = [];
   let datesVisited = 0;
+  const routePairs = resolveRoutePairs(request);
+  validatePhaseOneCrossLocationScope(request, routePairs);
 
   try {
-    for (const depot of request.locations) {
+    for (const routePair of routePairs) {
       const datePairs = generateDateCombinations(request.pickupDate, request.maxTripDays);
       if (datePairs.length === 0) {
         throw new Error("No date combinations generated");
@@ -461,7 +540,7 @@ export const runAutomatedScrape = async (
           datesVisited += 1;
         }
         console.log("[SCRAPER] Processing combo:", {
-          depot,
+          route: `${routePair.pickupLocation}->${routePair.dropoffLocation}`,
           pickupDate: pair.pickupDate,
           dropoffDate: pair.dropoffDate
         });
@@ -472,7 +551,8 @@ export const runAutomatedScrape = async (
             page,
             pair.pickupDate,
             pair.dropoffDate,
-            depot,
+            routePair.pickupLocation,
+            routePair.dropoffLocation,
             scrapeDate,
             warnings
           );
@@ -485,8 +565,10 @@ export const runAutomatedScrape = async (
           });
         } catch (error) {
           const message = error instanceof Error ? error.message : "unknown error";
-          console.error("[SCRAPER] Combo failed:", { depot, pair, message });
-          warnings.push(`Combo failed for ${depot} ${pair.pickupDate} -> ${pair.dropoffDate}: ${message}`);
+          console.error("[SCRAPER] Combo failed:", { routePair, pair, message });
+          warnings.push(
+            `Combo failed for ${routePair.pickupLocation}->${routePair.dropoffLocation} ${pair.pickupDate} -> ${pair.dropoffDate}: ${message}`
+          );
           await onProgress?.({
             rowsProcessed: rows.length,
             datesVisited,

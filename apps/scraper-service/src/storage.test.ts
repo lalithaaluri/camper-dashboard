@@ -17,6 +17,31 @@ const csvHeader = "pickup_date,dropoff_date,location,company,vehicle,price,scrap
 
 const toCsv = (rows: string[]) => `${csvHeader}${rows.join("\n")}\n`;
 
+const removeTempDirWithRetry = async (target: string, retries = 5) => {
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      await rm(target, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      const isResourceBusy =
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        (error as { code?: string }).code === "EBUSY";
+
+      if (isResourceBusy && attempt === retries) {
+        return;
+      }
+
+      if (attempt === retries) {
+        throw error;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
+    }
+  }
+};
+
 test("loadDataset reads from the shared API SQLite database", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "camper-storage-test-"));
   const originalDashboardDatasetFile = paths.dashboardDatasetFile;
@@ -63,7 +88,7 @@ test("loadDataset reads from the shared API SQLite database", async () => {
     paths.datasetFile = originalDatasetFile;
     paths.apiDbDir = originalApiDbDir;
     paths.apiPricingDbFile = originalApiPricingDbFile;
-    await rm(tempRoot, { recursive: true, force: true });
+    await removeTempDirWithRetry(tempRoot);
   }
 });
 
@@ -101,7 +126,7 @@ test("writeDataset keeps the service cache in sync with the dashboard master CSV
     paths.dashboardDatasetFile = originalDashboardDatasetFile;
     paths.datasetFile = originalDatasetFile;
     paths.buildDatasetFile = originalBuildDatasetFile;
-    await rm(tempRoot, { recursive: true, force: true });
+    await removeTempDirWithRetry(tempRoot);
   }
 });
 
@@ -191,6 +216,6 @@ test("insertPricingRows preserves historical rows across different scrape_date v
   } finally {
     paths.apiDbDir = originalApiDbDir;
     paths.apiPricingDbFile = originalApiPricingDbFile;
-    await rm(tempRoot, { recursive: true, force: true });
+    await removeTempDirWithRetry(tempRoot);
   }
 });

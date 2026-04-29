@@ -10,6 +10,8 @@ type SeedRow = {
   pickup_date: string;
   dropoff_date: string;
   location: string;
+  pickup_location?: string;
+  dropoff_location?: string;
   company: string;
   vehicle: string;
   price: number;
@@ -112,6 +114,42 @@ const seededRows: SeedRow[] = [
     pickup_date: "2026-07-01",
     dropoff_date: "2026-07-05",
     location: "auckland",
+    pickup_location: "auckland",
+    dropoff_location: "christchurch",
+    company: "jucy",
+    vehicle: "crib",
+    price: 805,
+    scrape_date: "2026-04-20",
+    type: "competitor"
+  },
+  {
+    pickup_date: "2026-07-01",
+    dropoff_date: "2026-07-05",
+    location: "auckland",
+    pickup_location: "auckland",
+    dropoff_location: "christchurch",
+    company: "jucy",
+    vehicle: "crib",
+    price: 780,
+    scrape_date: "2026-04-22",
+    type: "competitor"
+  },
+  {
+    pickup_date: "2026-07-01",
+    dropoff_date: "2026-07-05",
+    location: "christchurch",
+    pickup_location: "christchurch",
+    dropoff_location: "auckland",
+    company: "happycampers",
+    vehicle: "sleeper",
+    price: 799,
+    scrape_date: "2026-04-22",
+    type: "competitor"
+  },
+  {
+    pickup_date: "2026-07-01",
+    dropoff_date: "2026-07-05",
+    location: "auckland",
     company: "travellersautobarn",
     vehicle: "station wagon",
     price: 490,
@@ -167,6 +205,8 @@ const seedDatabase = (dbPath: string, rows: SeedRow[]) => {
       pickup_date TEXT,
       dropoff_date TEXT,
       location TEXT,
+      pickup_location TEXT,
+      dropoff_location TEXT,
       company TEXT,
       vehicle TEXT,
       price REAL,
@@ -180,12 +220,14 @@ const seedDatabase = (dbPath: string, rows: SeedRow[]) => {
       pickup_date,
       dropoff_date,
       location,
+      pickup_location,
+      dropoff_location,
       company,
       vehicle,
       price,
       scrape_date,
       type
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const insertMany = db.transaction((inputRows: SeedRow[]) => {
@@ -194,6 +236,8 @@ const seedDatabase = (dbPath: string, rows: SeedRow[]) => {
         row.pickup_date,
         row.dropoff_date,
         row.location,
+        row.pickup_location ?? null,
+        row.dropoff_location ?? null,
         row.company,
         row.vehicle,
         row.price,
@@ -277,6 +321,17 @@ afterAll(async () => {
 });
 
 describe("/api/prices baseline regression", () => {
+  test("/api/prices includes pickup_location and dropoff_location while keeping location", async () => {
+    const response = await fetch(`${apiBaseUrl}/api/prices`);
+    expect(response.ok).toBe(true);
+
+    const rows = (await response.json()) as Array<SeedRow & { pickup_location: string; dropoff_location: string }>;
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows[0]).toHaveProperty("location");
+    expect(rows[0]).toHaveProperty("pickup_location");
+    expect(rows[0]).toHaveProperty("dropoff_location");
+  });
+
   test("/api/prices/latest returns only latest scrape row per trip/company/vehicle combination", async () => {
     const response = await fetch(`${apiBaseUrl}/api/prices/latest`);
     expect(response.ok).toBe(true);
@@ -375,5 +430,39 @@ describe("/api/prices baseline regression", () => {
       "happycampers:sleeper",
       "travellersautobarn:station wagon"
     ]);
+  });
+
+  test("default /api/prices behavior remains same-location only", async () => {
+    const response = await fetch(`${apiBaseUrl}/api/prices`);
+    expect(response.ok).toBe(true);
+
+    const rows = (await response.json()) as Array<SeedRow & { pickup_location: string; dropoff_location: string }>;
+    expect(
+      rows.every((row) => row.pickup_location === row.dropoff_location)
+    ).toBe(true);
+  });
+
+  test("cross-location rows are retrievable with pickup/dropoff filters", async () => {
+    const response = await fetch(
+      `${apiBaseUrl}/api/prices/latest?pickup_location=auckland&dropoff_location=christchurch`
+    );
+    expect(response.ok).toBe(true);
+
+    const rows = (await response.json()) as Array<SeedRow & { pickup_location: string; dropoff_location: string }>;
+    expect(rows.length).toBeGreaterThan(0);
+    expect(
+      rows.every(
+        (row) =>
+          row.pickup_location === "auckland" && row.dropoff_location === "christchurch"
+      )
+    ).toBe(true);
+
+    const jucyCrib = rows.find(
+      (row) => row.company === "jucy" && row.vehicle === "crib"
+    );
+    expect(jucyCrib).toMatchObject({
+      scrape_date: "2026-04-22",
+      price: 780
+    });
   });
 });

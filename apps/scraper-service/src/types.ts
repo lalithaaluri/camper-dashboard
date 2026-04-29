@@ -2,9 +2,15 @@ export type DepotCode = "auckland" | "christchurch";
 
 export type RunStatus = "queued" | "running" | "completed" | "failed";
 
+export interface RoutePair {
+  pickupLocation: DepotCode;
+  dropoffLocation: DepotCode;
+}
+
 export interface ScrapeRequest {
   pickupDate: string;
   locations: DepotCode[];
+  routePairs: RoutePair[];
   maxTripDays: number;
   headless: boolean;
 }
@@ -12,6 +18,8 @@ export interface ScrapeRequest {
 export interface PriceRow {
   pickup_date: string;
   dropoff_date: string;
+  pickup_location?: DepotCode | null;
+  dropoff_location?: DepotCode | null;
   location: DepotCode;
   company: string;
   vehicle: string;
@@ -27,6 +35,7 @@ export interface RunSummary {
   updatedAt: string;
   pickupDate: string;
   locations: DepotCode[];
+  routePairs?: RoutePair[];
   maxTripDays: number;
   headless: boolean;
   rowsCaptured: number;

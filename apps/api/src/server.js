@@ -46,6 +46,37 @@ function normalizeVehicleRows(rows) {
   }));
 }
 
+function buildRouteFilters(query) {
+  const conditions = [];
+  const params = [];
+
+  const pickupLocation = typeof query.pickup_location === "string"
+    ? query.pickup_location.trim().toLowerCase()
+    : "";
+  const dropoffLocation = typeof query.dropoff_location === "string"
+    ? query.dropoff_location.trim().toLowerCase()
+    : "";
+
+  const hasRouteFilter = Boolean(pickupLocation || dropoffLocation);
+
+  if (hasRouteFilter) {
+    if (pickupLocation) {
+      conditions.push("COALESCE(pickup_location, location) = ?");
+      params.push(pickupLocation);
+    }
+    if (dropoffLocation) {
+      conditions.push("COALESCE(dropoff_location, location) = ?");
+      params.push(dropoffLocation);
+    }
+  } else {
+    conditions.push(
+      "(pickup_location IS NULL OR dropoff_location IS NULL OR pickup_location = dropoff_location)"
+    );
+  }
+
+  return { conditions, params };
+}
+
 app.use(
   cors({
     origin: "http://localhost:3000",
@@ -93,7 +124,27 @@ app.get("/api/prices", (req, res) => {
   try {
     console.log("API HIT: /api/prices");
     const db = getDb();
-    const rows = db.prepare("SELECT * FROM pricing_data;").all();
+    const { conditions, params } = buildRouteFilters(req.query);
+    const rows = db
+      .prepare(
+        `
+          SELECT
+            id,
+            pickup_date,
+            dropoff_date,
+            location,
+            COALESCE(pickup_location, location) AS pickup_location,
+            COALESCE(dropoff_location, location) AS dropoff_location,
+            company,
+            vehicle,
+            price,
+            scrape_date,
+            type
+          FROM pricing_data
+          ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""}
+        `
+      )
+      .all(...params);
     res.json(normalizeVehicleRows(rows));
   } catch (err) {
     console.error("API ERROR:", err);
@@ -105,39 +156,63 @@ app.get("/api/prices/latest", (req, res) => {
   try {
     console.log("API HIT: /api/prices/latest");
     const db = getDb();
+    const { conditions, params } = buildRouteFilters(req.query);
     const rows = db
       .prepare(
         `
           WITH normalized AS (
             SELECT
               p.*,
+              COALESCE(p.pickup_location, p.location) AS pickup_location_key,
+              COALESCE(p.dropoff_location, p.location) AS dropoff_location_key,
               ${NORMALIZED_SCRAPE_DATE_SQL} AS scrape_date_key
             FROM pricing_data p
           )
-          SELECT n.*
+          SELECT
+            n.id,
+            n.pickup_date,
+            n.dropoff_date,
+            n.location,
+            n.pickup_location_key AS pickup_location,
+            n.dropoff_location_key AS dropoff_location,
+            n.company,
+            n.vehicle,
+            n.price,
+            n.scrape_date,
+            n.type
           FROM normalized n
           JOIN (
             SELECT
               pickup_date,
               dropoff_date,
-              location,
+              pickup_location_key,
+              dropoff_location_key,
               company,
               vehicle,
               type,
               MAX(scrape_date_key) AS max_scrape_date
             FROM normalized
-            GROUP BY pickup_date, dropoff_date, location, company, vehicle, type
+            GROUP BY
+              pickup_date,
+              dropoff_date,
+              pickup_location_key,
+              dropoff_location_key,
+              company,
+              vehicle,
+              type
           ) latest
             ON n.pickup_date = latest.pickup_date
            AND n.dropoff_date = latest.dropoff_date
-           AND n.location = latest.location
+           AND n.pickup_location_key = latest.pickup_location_key
+           AND n.dropoff_location_key = latest.dropoff_location_key
            AND n.company = latest.company
            AND n.vehicle = latest.vehicle
            AND n.type = latest.type
            AND n.scrape_date_key = latest.max_scrape_date
+          ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""}
         `
       )
-      .all();
+      .all(...params);
     res.json(normalizeVehicleRows(rows));
   } catch (err) {
     console.error("LATEST PRICES ERROR:", err);
@@ -149,8 +224,7 @@ app.get("/api/trends", async (req, res) => {
   try {
     console.log("API HIT: /api/trends");
     const db = getDb();
-    const conditions = [];
-    const params = [];
+    const { conditions, params } = buildRouteFilters(req.query);
     const allowedFilters = ["vehicle", "location"];
 
     for (const key of allowedFilters) {
@@ -161,21 +235,22 @@ app.get("/api/trends", async (req, res) => {
       }
     }
 
-    const whereClause = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
     const query = `
-      SELECT
-        pickup_date,
-        dropoff_date,
-        location,
-        company,
-        vehicle,
-        price,
-        scrape_date,
-        type
-      FROM pricing_data
-      ${whereClause}
-      ;
-    `;
+        SELECT
+          pickup_date,
+          dropoff_date,
+          location,
+          COALESCE(pickup_location, location) AS pickup_location,
+          COALESCE(dropoff_location, location) AS dropoff_location,
+          company,
+          vehicle,
+          price,
+          scrape_date,
+          type
+        FROM pricing_data
+        ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""}
+        ;
+      `;
 
     const rows = db.prepare(query).all(...params);
     res.json(normalizeVehicleRows(rows));

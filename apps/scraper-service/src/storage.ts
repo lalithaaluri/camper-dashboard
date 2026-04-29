@@ -121,6 +121,18 @@ const openPricingDb = () => {
     );
   `);
 
+  const existingColumns = db
+    .prepare(`PRAGMA table_info(pricing_data)`)
+    .all() as Array<{ name: string }>;
+  const existingColumnNames = new Set(existingColumns.map((column) => column.name));
+
+  if (!existingColumnNames.has("pickup_location")) {
+    db.exec(`ALTER TABLE pricing_data ADD COLUMN pickup_location TEXT`);
+  }
+  if (!existingColumnNames.has("dropoff_location")) {
+    db.exec(`ALTER TABLE pricing_data ADD COLUMN dropoff_location TEXT`);
+  }
+
   const indexes = db
     .prepare(
       `
@@ -163,12 +175,14 @@ export const insertPricingRows = async (rows: PriceRow[]) => {
       pickup_date,
       dropoff_date,
       location,
+      pickup_location,
+      dropoff_location,
       company,
       vehicle,
       price,
       scrape_date,
       type
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
   `);
   let inserted = 0;
 
@@ -179,6 +193,8 @@ export const insertPricingRows = async (rows: PriceRow[]) => {
         row.pickup_date,
         row.dropoff_date,
         row.location,
+        row.pickup_location ?? row.location,
+        row.dropoff_location ?? row.location,
         row.company,
         row.vehicle,
         row.price,
@@ -265,6 +281,8 @@ const loadDatasetFromDb = async (): Promise<PriceRow[]> => {
             pickup_date,
             dropoff_date,
             location,
+            pickup_location,
+            dropoff_location,
             company,
             vehicle,
             price,
@@ -277,6 +295,8 @@ const loadDatasetFromDb = async (): Promise<PriceRow[]> => {
       pickup_date: string;
       dropoff_date: string;
       location: string;
+      pickup_location?: string | null;
+      dropoff_location?: string | null;
       company: string;
       vehicle: string;
       price: number;
@@ -291,6 +311,12 @@ const loadDatasetFromDb = async (): Promise<PriceRow[]> => {
       return {
         pickup_date: normalizeDate(String(row.pickup_date ?? "")),
         dropoff_date: normalizeDate(String(row.dropoff_date ?? "")),
+        pickup_location: String(
+          row.pickup_location ?? row.location ?? ""
+        ).trim().toLowerCase() as PriceRow["pickup_location"],
+        dropoff_location: String(
+          row.dropoff_location ?? row.location ?? ""
+        ).trim().toLowerCase() as PriceRow["dropoff_location"],
         location: String(row.location ?? "").trim().toLowerCase() as PriceRow["location"],
         company: String(row.company ?? "").trim().toLowerCase(),
         vehicle: String(row.vehicle ?? "").trim().toLowerCase(),
