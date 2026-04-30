@@ -165,11 +165,12 @@ const fillBookingWidget = async (
     `${SEARCH_FORM_SELECTOR} select[name="Parameters.LocationFrom"]`,
     pickupLabel
   );
+  const allowSameAsPickupFallback = pickupDepot === dropoffDepot;
   const dropoffSet = await setSelectizeValue(
     page,
     `${SEARCH_FORM_SELECTOR} select[name="Parameters.LocationTo"]`,
     dropoffLabel,
-    true
+    allowSameAsPickupFallback
   );
 
   const datesSet = await page.evaluate(
@@ -214,6 +215,127 @@ const fillBookingWidget = async (
   );
 
   return pickupSet && dropoffSet && datesSet;
+};
+
+const readSearchFormState = async (page: Page) =>
+  page.evaluate(({ formSelector }) => {
+    const form = document.querySelector(formSelector);
+    const fromSelect = document.querySelector(
+      `${formSelector} select[name="Parameters.LocationFrom"]`
+    ) as (HTMLSelectElement & { selectize?: Record<string, unknown> }) | null;
+    const toSelect = document.querySelector(
+      `${formSelector} select[name="Parameters.LocationTo"]`
+    ) as (HTMLSelectElement & { selectize?: Record<string, unknown> }) | null;
+
+    const fromSelectize = fromSelect?.selectize as
+      | {
+          getValue?: () => string;
+          getItem?: (value: string) => HTMLElement | null;
+        }
+      | undefined;
+    const toSelectize = toSelect?.selectize as
+      | {
+          getValue?: () => string;
+          getItem?: (value: string) => HTMLElement | null;
+        }
+      | undefined;
+
+    const fromValue = fromSelectize?.getValue?.() ?? fromSelect?.value ?? null;
+    const toValue = toSelectize?.getValue?.() ?? toSelect?.value ?? null;
+
+    const fromItemLabel =
+      fromValue && fromSelectize?.getItem
+        ? (fromSelectize.getItem(fromValue)?.textContent || "").trim()
+        : null;
+    const toItemLabel =
+      toValue && toSelectize?.getItem
+        ? (toSelectize.getItem(toValue)?.textContent || "").trim()
+        : null;
+
+    const fromOptionLabel =
+      fromValue && fromSelect?.options
+        ? fromSelect.options[fromSelect.selectedIndex]?.text?.trim() || null
+        : null;
+    const toOptionLabel =
+      toValue && toSelect?.options
+        ? toSelect.options[toSelect.selectedIndex]?.text?.trim() || null
+        : null;
+
+    const hiddenPickup = form?.querySelector(
+      'input[name="Parameters.DateFrom"]'
+    ) as HTMLInputElement | null;
+    const hiddenDropoff = form?.querySelector(
+      'input[name="Parameters.DateTo"]'
+    ) as HTMLInputElement | null;
+
+    return {
+      locationFrom: {
+        value: fromValue,
+        label: fromItemLabel || fromOptionLabel
+      },
+      locationTo: {
+        value: toValue,
+        label: toItemLabel || toOptionLabel
+      },
+      pickupDate: hiddenPickup?.value || null,
+      dropoffDate: hiddenDropoff?.value || null
+    };
+  }, { formSelector: SEARCH_FORM_SELECTOR });
+
+const ensureWidgetStateBeforeSubmit = async (
+  page: Page,
+  pickupDepot: DepotCode,
+  dropoffDepot: DepotCode,
+  pickupDate: string,
+  dropoffDate: string
+) => {
+  const isCrossLocation = pickupDepot !== dropoffDepot;
+  const expectedPickupLabel = DEPOTS[pickupDepot].label.toLowerCase();
+  const expectedDropoffLabel = DEPOTS[dropoffDepot].label.toLowerCase();
+
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const widgetReady = await fillBookingWidget(
+      page,
+      pickupDepot,
+      dropoffDepot,
+      pickupDate,
+      dropoffDate
+    );
+    if (!widgetReady) {
+      await pause(350);
+      continue;
+    }
+
+    await pause(400);
+    const formState = await readSearchFormState(page);
+    const pickupMatches = formState.pickupDate === pickupDate;
+    const dropoffMatches = formState.dropoffDate === dropoffDate;
+    const fromLabelMatches =
+      !formState.locationFrom.label ||
+      formState.locationFrom.label.toLowerCase().includes(expectedPickupLabel);
+    const toLabelMatches =
+      !formState.locationTo.label ||
+      formState.locationTo.label.toLowerCase().includes(expectedDropoffLabel);
+    const routeLooksValid = isCrossLocation
+      ? Boolean(formState.locationFrom.value) &&
+        Boolean(formState.locationTo.value) &&
+        formState.locationFrom.value !== formState.locationTo.value &&
+        formState.locationTo.value !== "0"
+      : true;
+
+    if (
+      pickupMatches &&
+      dropoffMatches &&
+      fromLabelMatches &&
+      toLabelMatches &&
+      routeLooksValid
+    ) {
+      return { ready: true, state: formState };
+    }
+  }
+
+  const finalState = await readSearchFormState(page);
+  return { ready: false, state: finalState };
 };
 
 const submitSearch = async (page: Page) => {
@@ -272,23 +394,83 @@ const collectCurrentPageRows = async (
 
   for (let index = 0; index < count; index += 1) {
     const payload = await blocks.nth(index).evaluate((node) => {
-      const priceNode = node.querySelector("p");
-      const priceText = (priceNode?.textContent || node.textContent || "").trim();
       let current = node.parentElement;
       let fullText = "";
+      let cardRoot: Element = node;
 
       for (let hops = 0; hops < 10 && current; hops += 1) {
         fullText = (current.textContent || "").replace(/\s+/g, " ").trim();
+        cardRoot = current;
         if (fullText.length > 50) {
           break;
         }
         current = current.parentElement;
       }
 
-      return { priceText, fullText };
+      const candidates = Array.from(
+        cardRoot.querySelectorAll("p, span, strong, b, div")
+      )
+        .flatMap((element) => {
+          const text = (element.textContent || "").replace(/\s+/g, " ").trim();
+          if (!text || !/[\d]/.test(text)) {
+            return [];
+          }
+
+          const matches = Array.from(text.matchAll(/\$?\s*\d[\d,]*(?:\.\d{2})?/g)).map(
+            (entry) => entry[0]
+          );
+          if (!matches.length) {
+            return [];
+          }
+
+          const style = window.getComputedStyle(element);
+          const className = (element.getAttribute("class") || "").toLowerCase();
+          const textDecoration = (style.textDecoration || "").toLowerCase();
+          const lowered = text.toLowerCase();
+          const isStruck =
+            textDecoration.includes("line-through") ||
+            className.includes("strike") ||
+            className.includes("strikethrough") ||
+            className.includes("old") ||
+            className.includes("was") ||
+            lowered.includes("was ");
+          const isFeeLike =
+            lowered.includes("fee") ||
+            lowered.includes("surcharge") ||
+            lowered.includes("deposit");
+          const isCurrentLike =
+            className.includes("price-label") ||
+            className.includes("current") ||
+            className.includes("now") ||
+            className.includes("total");
+
+          let baseScore = 0;
+          if (isCurrentLike) baseScore += 3;
+          if (isFeeLike) baseScore -= 2;
+          if (isStruck) baseScore -= 6;
+          if (text.includes("$")) baseScore += 1;
+          if (text.length < 24) baseScore += 1;
+
+          // Some cards include old+new prices in the same text node.
+          // Prefer later token in that text because current displayed value is often last.
+          return matches.map((matched, tokenIndex) => ({
+            text,
+            matched,
+            score: baseScore + tokenIndex
+          }));
+        })
+        .sort((left, right) => right.score - left.score);
+
+      const fallbackText = (node.textContent || "").replace(/\s+/g, " ").trim();
+      const selected = candidates[0]?.matched || fallbackText;
+
+      return {
+        selectedPriceText: selected,
+        fullText
+      };
     });
 
-    const price = cleanPrice(payload.priceText);
+    const price = cleanPrice(payload.selectedPriceText);
     const match = identifyVehicle(payload.fullText);
 
     if (!price || !match) {
@@ -362,24 +544,48 @@ const scrapeQuoteSet = async (
   scrapeDate: string,
   warnings: string[]
 ) => {
-  console.log(
-    `[SCRAPER] Loading page for ${pickupDepot}->${dropoffDepot} ${pickupDate} -> ${dropoffDate}`
-  );
-  await page.goto(BASE_URL, { waitUntil: "domcontentloaded", timeout: SEARCH_TIMEOUT_MS });
-  await dismissOverlays(page);
-  await page.locator(SEARCH_FORM_SELECTOR).first().waitFor({ timeout: SEARCH_TIMEOUT_MS });
-  console.log("[SCRAPER] Search form loaded");
+  let submitted = false;
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    console.log(
+      `[SCRAPER] Loading page for ${pickupDepot}->${dropoffDepot} ${pickupDate} -> ${dropoffDate} (attempt ${attempt}/2)`
+    );
+    await page.goto(BASE_URL, { waitUntil: "domcontentloaded", timeout: SEARCH_TIMEOUT_MS });
+    await dismissOverlays(page);
+    await page.locator(SEARCH_FORM_SELECTOR).first().waitFor({ timeout: SEARCH_TIMEOUT_MS });
+    console.log("[SCRAPER] Search form loaded");
 
-  const widgetReady = await fillBookingWidget(
-    page,
-    pickupDepot,
-    dropoffDepot,
-    pickupDate,
-    dropoffDate
-  );
-  const submitted = await submitSearch(page);
+    const widgetSetup = await ensureWidgetStateBeforeSubmit(
+      page,
+      pickupDepot,
+      dropoffDepot,
+      pickupDate,
+      dropoffDate
+    );
+    console.log("[SCRAPER][SUBMIT-CHECK]", {
+      requestedRoute: `${pickupDepot}->${dropoffDepot}`,
+      pickupDate,
+      dropoffDate,
+      attempt,
+      domLocationFrom: widgetSetup.state.locationFrom,
+      domLocationTo: widgetSetup.state.locationTo,
+      domPickupDate: widgetSetup.state.pickupDate,
+      domDropoffDate: widgetSetup.state.dropoffDate
+    });
 
-  if (!widgetReady || !submitted) {
+    if (!widgetSetup.ready) {
+      if (attempt === 2) {
+        break;
+      }
+      continue;
+    }
+
+    submitted = await submitSearch(page);
+    if (submitted) {
+      break;
+    }
+  }
+
+  if (!submitted) {
     warnings.push(
       `Unable to fully automate the search form for ${pickupDepot}->${dropoffDepot} ${pickupDate} -> ${dropoffDate}.`
     );

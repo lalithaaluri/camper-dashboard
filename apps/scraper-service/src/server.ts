@@ -99,15 +99,63 @@ const normalizeRequest = (body: unknown): ScrapeRequest => {
   };
 };
 
+const clearStaleActiveRunLock = async () => {
+  if (!activeRunId) {
+    return;
+  }
+
+  const runs = await loadRunHistory();
+  const activeRun = runs.find((run) => run.id === activeRunId) ?? null;
+  const isActuallyActive =
+    activeRun?.status === "running" || activeRun?.status === "queued";
+
+  if (!isActuallyActive) {
+    activeRunId = null;
+  }
+};
+
+const recoverStaleRunLock = async () => {
+  await clearStaleActiveRunLock();
+  const runs = await loadRunHistory();
+  const latestRun = runs[0] ?? null;
+  if (!latestRun) {
+    return null;
+  }
+
+  const hasMatchingActiveRun =
+    Boolean(activeRunId) && latestRun.id === activeRunId;
+  if (hasMatchingActiveRun) {
+    return latestRun;
+  }
+
+  if (latestRun.status !== "running" && latestRun.status !== "queued") {
+    return latestRun;
+  }
+
+  const recoveredRun: RunSummary = {
+    ...latestRun,
+    status: "failed",
+    updatedAt: new Date().toISOString(),
+    error:
+      latestRun.error ||
+      "Run interrupted: scraper service restarted before the job completed."
+  };
+
+  await upsertRun(recoveredRun);
+  return recoveredRun;
+};
+
 app.use(cors());
 app.use(express.json());
 app.use("/artifacts", express.static(paths.artifactsDir));
 app.use("/data", express.static(paths.dataDir));
 
 app.get("/api/health", async (_request, response) => {
+  await clearStaleActiveRunLock();
+  const recoveredRun = await recoverStaleRunLock();
   const dataset = summarizeDataset(await loadDataset());
   const runs = await loadRunHistory();
-  const latestRun = runs[0] ?? null;
+  const latestRun = recoveredRun ?? runs[0] ?? null;
 
   response.json({
     ok: true,
@@ -127,6 +175,7 @@ app.get("/api/runs", async (_request, response) => {
 });
 
 app.post("/api/runs", async (request, response) => {
+  await clearStaleActiveRunLock();
   if (activeRunId) {
     response.status(409).json({
       error: "A scrape run is already in progress.",
@@ -239,7 +288,8 @@ app.post("/api/fix-trek-june-auckland", async (req, res) => {
 });
 
 ensureStorage()
-  .then(() => {
+  .then(async () => {
+    await recoverStaleRunLock();
     app.listen(port, () => {
       console.log(`scraper-service listening on http://localhost:${port}`);
       void AUTO_RUN;

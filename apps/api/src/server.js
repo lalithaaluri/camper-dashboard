@@ -167,48 +167,64 @@ app.get("/api/prices/latest", (req, res) => {
               COALESCE(p.dropoff_location, p.location) AS dropoff_location_key,
               ${NORMALIZED_SCRAPE_DATE_SQL} AS scrape_date_key
             FROM pricing_data p
+          ),
+          latest_elements AS (
+            SELECT
+              n.*,
+              ROW_NUMBER() OVER (
+                PARTITION BY
+                  n.pickup_date,
+                  n.dropoff_date,
+                  n.pickup_location_key,
+                  n.dropoff_location_key,
+                  n.company,
+                  n.vehicle
+                ORDER BY n.scrape_date_key DESC, n.id DESC
+              ) AS rn
+            FROM normalized n
+            WHERE n.type = 'elements'
+          ),
+          latest_competitors AS (
+            SELECT
+              n.*,
+              ROW_NUMBER() OVER (
+                PARTITION BY
+                  n.pickup_date,
+                  n.dropoff_date,
+                  n.pickup_location_key,
+                  n.dropoff_location_key,
+                  n.company,
+                  n.vehicle
+                ORDER BY n.scrape_date_key DESC, n.id DESC
+              ) AS rn
+            FROM normalized n
+            WHERE n.type = 'competitor'
+          ),
+          latest_rows AS (
+            SELECT * FROM latest_elements WHERE rn = 1
+            UNION ALL
+            SELECT * FROM latest_competitors WHERE rn = 1
+          ),
+          latest_rows_with_route AS (
+            SELECT
+              lr.*,
+              lr.pickup_location_key AS pickup_location,
+              lr.dropoff_location_key AS dropoff_location
+            FROM latest_rows lr
           )
           SELECT
-            n.id,
-            n.pickup_date,
-            n.dropoff_date,
-            n.location,
-            n.pickup_location_key AS pickup_location,
-            n.dropoff_location_key AS dropoff_location,
-            n.company,
-            n.vehicle,
-            n.price,
-            n.scrape_date,
-            n.type
-          FROM normalized n
-          JOIN (
-            SELECT
-              pickup_date,
-              dropoff_date,
-              pickup_location_key,
-              dropoff_location_key,
-              company,
-              vehicle,
-              type,
-              MAX(scrape_date_key) AS max_scrape_date
-            FROM normalized
-            GROUP BY
-              pickup_date,
-              dropoff_date,
-              pickup_location_key,
-              dropoff_location_key,
-              company,
-              vehicle,
-              type
-          ) latest
-            ON n.pickup_date = latest.pickup_date
-           AND n.dropoff_date = latest.dropoff_date
-           AND n.pickup_location_key = latest.pickup_location_key
-           AND n.dropoff_location_key = latest.dropoff_location_key
-           AND n.company = latest.company
-           AND n.vehicle = latest.vehicle
-           AND n.type = latest.type
-           AND n.scrape_date_key = latest.max_scrape_date
+            l.id,
+            l.pickup_date,
+            l.dropoff_date,
+            l.location,
+            l.pickup_location,
+            l.dropoff_location,
+            l.company,
+            l.vehicle,
+            l.price,
+            l.scrape_date,
+            l.type
+          FROM latest_rows_with_route l
           ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""}
         `
       )

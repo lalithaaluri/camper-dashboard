@@ -178,6 +178,61 @@ const normalizeVehicleName = (name) => normalizeVehicle(name);
 const isValidCompetitorPriceRow = (row) =>
   Number.isFinite(Number(row?.price)) && Number(row.price) > 10;
 
+const matchesCompetitorRouteSelection = (
+  row,
+  { selectedPickupLocation = "", selectedDropoffLocation = "", selectedLocation = "" } = {}
+) => {
+  const selectedPickup = normalize(selectedPickupLocation || selectedLocation || "");
+  const selectedDropoff = normalize(
+    selectedDropoffLocation || selectedPickupLocation || selectedLocation || ""
+  );
+
+  if (!selectedPickup && !selectedDropoff) {
+    return true;
+  }
+
+  const rowPickup = normalize(row.pickupLocation || row.location);
+  const rowDropoff = normalize(row.dropoffLocation || row.location);
+  const rowLocation = normalize(row.location);
+  const hasExplicitPickup = Boolean(row.hasExplicitPickupLocation);
+  const hasExplicitDropoff = Boolean(row.hasExplicitDropoffLocation);
+  const isSameLocationSelection =
+    Boolean(selectedPickup) && Boolean(selectedDropoff) && selectedPickup === selectedDropoff;
+
+  if (isSameLocationSelection) {
+    const explicitSameLocationMatch =
+      hasExplicitPickup &&
+      hasExplicitDropoff &&
+      rowPickup === selectedPickup &&
+      rowDropoff === selectedDropoff;
+    const legacySameLocationMatch =
+      !hasExplicitPickup &&
+      !hasExplicitDropoff &&
+      rowLocation === selectedPickup;
+
+    return explicitSameLocationMatch || legacySameLocationMatch;
+  }
+
+  return (
+    hasExplicitPickup &&
+    hasExplicitDropoff &&
+    rowPickup === selectedPickup &&
+    rowDropoff === selectedDropoff
+  );
+};
+
+const buildCanonicalTripKey = (row) =>
+  [
+    row.dateKey,
+    row.dropoffDateKey,
+    row.pickupLocation || row.location,
+    row.dropoffLocation || row.location
+  ].join("|");
+
+const rowMatchesSelectedRawTripLineage = (row, selectedPickupDate, selectedDropoffDate) =>
+  String(row?.rawPickupDate || "").trim() === String(selectedPickupDate || "").trim() &&
+  String(row?.rawDropoffDate || "").trim() === String(selectedDropoffDate || "").trim();
+
 function formatDateDMY(dateStr) {
   if (!dateStr) return "";
 
@@ -345,6 +400,39 @@ export const compareScrapeDates = (left, right) => {
   return leftTime - rightTime;
 };
 
+const compareRowFreshness = (left, right) => {
+  const dateDiff = compareScrapeDates(left?.scrapeDate, right?.scrapeDate);
+  if (dateDiff !== 0) {
+    return dateDiff;
+  }
+
+  const leftId = Number.isFinite(Number(left?.id)) ? Number(left.id) : Number.NEGATIVE_INFINITY;
+  const rightId = Number.isFinite(Number(right?.id)) ? Number(right.id) : Number.NEGATIVE_INFINITY;
+  return leftId - rightId;
+};
+
+export const selectLatestCompetitorRows = (rows) => {
+  const latestByKey = new Map();
+
+  rows.forEach((row) => {
+    const key = [
+      row.dateKey,
+      row.dropoffDateKey,
+      row.pickupLocation || row.location,
+      row.dropoffLocation || row.location,
+      row.company,
+      normalizeVehicleName(row.vehicle)
+    ].join("|");
+    const current = latestByKey.get(key);
+
+    if (!current || compareRowFreshness(row, current) >= 0) {
+      latestByKey.set(key, row);
+    }
+  });
+
+  return Array.from(latestByKey.values());
+};
+
 export const selectLatestRowsBySnapshot = (rows) => {
   const latestByKey = new Map();
 
@@ -450,7 +538,9 @@ export const buildCompetitorQuoteSnapshot = ({
   selectedPickup = "",
   selectedDropoff = "",
   selectedVehicle = "",
-  selectedLocation = ""
+  selectedLocation = "",
+  selectedPickupLocation = "",
+  selectedDropoffLocation = ""
 }) => {
   const competitors = getMappedCompetitors(selectedVehicle);
   const filteredRows = rows.filter((row) => {
@@ -494,13 +584,20 @@ export const buildCompetitorQuoteSnapshot = ({
       return false;
     }
 
-    if (selectedLocation && row.location !== normalize(selectedLocation)) {
+    if (
+      !matchesCompetitorRouteSelection(row, {
+        selectedPickupLocation,
+        selectedDropoffLocation,
+        selectedLocation
+      })
+    ) {
       return false;
     }
 
     return true;
   });
-  const latestScrapeDate = filteredRows.reduce((latest, row) => {
+  const latestCompetitorRows = selectLatestCompetitorRows(filteredRows);
+  const latestScrapeDate = latestCompetitorRows.reduce((latest, row) => {
     if (!(row.scrapeDate instanceof Date) || Number.isNaN(row.scrapeDate.getTime())) {
       return latest;
     }
@@ -511,15 +608,7 @@ export const buildCompetitorQuoteSnapshot = ({
 
     return latest;
   }, null);
-  const latestRows = latestScrapeDate
-    ? filteredRows.filter(
-        (row) =>
-          row.scrapeDate instanceof Date &&
-          !Number.isNaN(row.scrapeDate.getTime()) &&
-          compareScrapeDates(row.scrapeDate, latestScrapeDate) === 0
-      )
-    : filteredRows;
-  const validCompetitorRows = latestRows.filter(isValidCompetitorPriceRow);
+  const validCompetitorRows = latestCompetitorRows.filter(isValidCompetitorPriceRow);
   const quoteRows = dedupeQuoteRows(validCompetitorRows)
     .map((row) => {
       const durationDays = getRowDurationDays(row);
@@ -563,6 +652,7 @@ export const buildCompetitorQuoteSnapshot = ({
     .sort((left, right) => left.average - right.average);
 
   return {
+    latestCompetitorRows: quoteRows,
     rows: quoteRows,
     companyStats,
     latestScrapeDate,
@@ -1817,8 +1907,8 @@ function App() {
   const [pendingDropoffLocation, setPendingDropoffLocation] = useState("");
   const [appliedPickupLocation, setAppliedPickupLocation] = useState("auckland");
   const [appliedDropoffLocation, setAppliedDropoffLocation] = useState("");
-  const [selectedDate, setSelectedDate] = useState("");
-  const [selectedDropoff, setSelectedDropoff] = useState("");
+  const [selectedPickupDate, setSelectedPickupDate] = useState("");
+  const [selectedDropoffDate, setSelectedDropoffDate] = useState("");
   const [isDropoffUserSelected, setIsDropoffUserSelected] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
@@ -1828,19 +1918,12 @@ function App() {
     new Date().toISOString().slice(0, 10)
   );
   const [scrapeMaxTripDays, setScrapeMaxTripDays] = useState(30);
-  const [scrapeRoutes, setScrapeRoutes] = useState([
-    "auckland->auckland",
-    "christchurch->christchurch",
-    "auckland->christchurch",
-    "christchurch->auckland"
-  ]);
+  const [scrapeSelectedRoute, setScrapeSelectedRoute] = useState("auckland->auckland");
   const [scrapeHeadless, setScrapeHeadless] = useState(true);
   const [scrapeSubmitting, setScrapeSubmitting] = useState(false);
   const [scraperStatus, setScraperStatus] = useState(initialScraperStatus);
   const [dataReloadTrigger, setDataReloadTrigger] = useState(0);
   const [scrapeRunFeedback, setScrapeRunFeedback] = useState("");
-  const pickupDateInputRef = useRef(null);
-  const dropoffDateInputRef = useRef(null);
   const scrapePickupDateInputRef = useRef(null);
 
   const selectedLocationForLegacyFilters = appliedPickupLocation || location;
@@ -1849,20 +1932,27 @@ function App() {
       ? `${appliedPickupLocation} -> ${appliedDropoffLocation}`
       : location || "All depots";
   const lastAutoRefreshedRunIdRef = useRef(null);
-  const pickupDate = selectedDate;
-  const dropoffDate = selectedDropoff;
+  const pickupDate = selectedPickupDate;
+  const dropoffDate = selectedDropoffDate;
   const scrapeLocations = useMemo(() => {
-    const selectedRouteLocations = scrapeRouteOptions
-      .filter((option) => scrapeRoutes.includes(option.value))
-      .flatMap((option) => option.locations);
-    return Array.from(new Set(selectedRouteLocations));
-  }, [scrapeRoutes]);
+    const selectedRoute = scrapeRouteOptions.find(
+      (option) => option.value === scrapeSelectedRoute
+    );
+    return selectedRoute ? [...selectedRoute.locations] : [];
+  }, [scrapeSelectedRoute]);
+  const scrapeRoutePairs = useMemo(() => {
+    const [pickupLocation, dropoffLocation] = String(scrapeSelectedRoute).split("->");
+    if (!pickupLocation || !dropoffLocation) {
+      return [];
+    }
+    return [{ pickupLocation, dropoffLocation }];
+  }, [scrapeSelectedRoute]);
   const handlePickupDateChange = (event) => {
-    setSelectedDate(event.target.value);
+    setSelectedPickupDate(event.target.value);
     setIsDropoffUserSelected(false);
   };
   const handleDropoffDateChange = (event) => {
-    setSelectedDropoff(event.target.value);
+    setSelectedDropoffDate(event.target.value);
     setIsDropoffUserSelected(true);
   };
   const handlePickupLocationChange = (event) => {
@@ -1929,6 +2019,9 @@ function App() {
         }
         if (appliedDropoffLocation) {
           queryParams.set("dropoff_location", appliedDropoffLocation);
+        } else if (appliedPickupLocation) {
+          // "Same as Pick Up" is the default dropoff behavior.
+          queryParams.set("dropoff_location", appliedPickupLocation);
         }
         const query = queryParams.toString() ? `?${queryParams.toString()}` : "";
         const pricesUrl = `${PRICING_API_BASE}/api/prices/latest${query}`;
@@ -1970,6 +2063,9 @@ function App() {
               }
 
               return {
+                id: Number.isFinite(Number(row.id)) ? Number(row.id) : null,
+                rawPickupDate: row.pickup_date ? String(row.pickup_date).trim() : "",
+                rawDropoffDate: row.dropoff_date ? String(row.dropoff_date).trim() : "",
                 dateKey,
                 dropoffDate: row.dropoff_date ? String(row.dropoff_date).trim() : "",
                 dropoffDateKey,
@@ -1978,6 +2074,14 @@ function App() {
                 location: normalize(row.location),
                 pickupLocation: normalize(row.pickup_location || row.location),
                 dropoffLocation: normalize(row.dropoff_location || row.location),
+                hasExplicitPickupLocation:
+                  row.pickup_location !== null &&
+                  row.pickup_location !== undefined &&
+                  String(row.pickup_location).trim() !== "",
+                hasExplicitDropoffLocation:
+                  row.dropoff_location !== null &&
+                  row.dropoff_location !== undefined &&
+                  String(row.dropoff_location).trim() !== "",
                 type: normalize(row.type),
                 price,
                 tripDays: calculateTripDays(dateObject, dropoffObject),
@@ -2111,18 +2215,18 @@ function App() {
       relevantRows.push(row);
     });
     console.log("FILTERED DATA:", relevantRows.length);
-    console.log("Filters:", vehicle, selectedLocationForLegacyFilters, [selectedDate, selectedDropoff]);
+    console.log("Filters:", vehicle, selectedLocationForLegacyFilters, [selectedPickupDate, selectedDropoffDate]);
 
     setDashboard(
       buildDashboardFromRows({
         rows: relevantRows,
         config,
         adjustment,
-        selectedDate,
+        selectedDate: selectedPickupDate,
         selectedVehicle: vehicle
       })
     );
-  }, [adjustment, selectedLocationForLegacyFilters, rows, selectedDate, selectedDropoff, vehicle]);
+  }, [adjustment, selectedLocationForLegacyFilters, rows, selectedPickupDate, selectedDropoffDate, vehicle]);
 
   useEffect(() => {
     if (!trendData.length) {
@@ -2146,18 +2250,18 @@ function App() {
       relevantTrendRows.push(row);
     });
     console.log("FILTERED DATA:", relevantTrendRows.length);
-    console.log("Filters:", vehicle, selectedLocationForLegacyFilters, [selectedDate, selectedDropoff]);
+    console.log("Filters:", vehicle, selectedLocationForLegacyFilters, [selectedPickupDate, selectedDropoffDate]);
 
     setTrendDashboard(
       buildDashboardFromRows({
         rows: relevantTrendRows,
         config,
         adjustment,
-        selectedDate,
+        selectedDate: selectedPickupDate,
         selectedVehicle: vehicle
       })
     );
-  }, [adjustment, selectedLocationForLegacyFilters, trendData, selectedDate, selectedDropoff, vehicle]);
+  }, [adjustment, selectedLocationForLegacyFilters, trendData, selectedPickupDate, selectedDropoffDate, vehicle]);
 
   const dropoffOptions = Array.from(
     new Set(
@@ -2174,10 +2278,10 @@ function App() {
   ).sort();
 
   useEffect(() => {
-    if (selectedDropoff && !dropoffOptions.includes(selectedDropoff)) {
-      setSelectedDropoff("");
+    if (selectedDropoffDate && !dropoffOptions.includes(selectedDropoffDate)) {
+      setSelectedDropoffDate("");
     }
-  }, [selectedDropoff, dropoffOptions]);
+  }, [selectedDropoffDate, dropoffOptions]);
 
   useEffect(() => {
     if (!rows.length || pickupDate || dropoffDate) {
@@ -2196,8 +2300,8 @@ function App() {
     }
 
     setVehicle(normalizeVehicle(bestRow.vehicle));
-    setSelectedDate(bestRow.dateKey);
-    setSelectedDropoff(bestRow.dropoffDateKey);
+    setSelectedPickupDate(bestRow.dateKey);
+    setSelectedDropoffDate(bestRow.dropoffDateKey);
   }, [rows, pickupDate, dropoffDate, vehicle]);
 
   useEffect(() => {
@@ -2213,48 +2317,173 @@ function App() {
     );
 
     if (
-      selectedDropoff &&
-      matchingRows.some((row) => row.dropoffDateKey === selectedDropoff)
+      selectedDropoffDate &&
+      matchingRows.some((row) => row.dropoffDateKey === selectedDropoffDate)
     ) {
       return;
     }
 
     if (!isDropoffUserSelected && matchingRows.length > 0) {
-      setSelectedDropoff(matchingRows[0].dropoffDateKey);
+      setSelectedDropoffDate(matchingRows[0].dropoffDateKey);
     }
-  }, [pickupDate, selectedDropoff, isDropoffUserSelected, vehicle, rows]);
+  }, [pickupDate, selectedDropoffDate, isDropoffUserSelected, vehicle, rows]);
 
   const exactTripMetrics = buildExactTripMetrics({
     rows,
-    selectedPickup: selectedDate,
-    selectedDropoff,
+    selectedPickup: selectedPickupDate,
+    selectedDropoff: selectedDropoffDate,
     selectedVehicle: vehicle,
     selectedLocation: selectedLocationForLegacyFilters
   });
+  const effectivePickupRouteFilter = appliedPickupLocation || selectedLocationForLegacyFilters || "";
+  const effectiveDropoffRouteFilter = appliedDropoffLocation || effectivePickupRouteFilter || "";
   const competitorQuoteSnapshot = buildCompetitorQuoteSnapshot({
     rows,
-    selectedPickup: selectedDate,
-    selectedDropoff,
+    selectedPickup: selectedPickupDate,
+    selectedDropoff: selectedDropoffDate,
     selectedVehicle: vehicle,
-    selectedLocation: selectedLocationForLegacyFilters
+    selectedLocation: selectedLocationForLegacyFilters,
+    selectedPickupLocation: effectivePickupRouteFilter,
+    selectedDropoffLocation: effectiveDropoffRouteFilter
   });
-  const elementsRow = exactTripMetrics.selectedRow;
-  const quoteTableRows = buildQuoteTableRows({
-    elementsRow,
-    competitorRows: competitorQuoteSnapshot.rows
+  const mappedCompetitorTokens = getMappedCompetitors(vehicle);
+  const selectedTripRows = rows.filter(
+    (row) =>
+      (!selectedPickupDate || row.dateKey === selectedPickupDate) &&
+      (!selectedDropoffDate || row.dropoffDateKey === selectedDropoffDate) &&
+      matchesCompetitorRouteSelection(row, {
+        selectedPickupLocation: effectivePickupRouteFilter,
+        selectedDropoffLocation: effectiveDropoffRouteFilter,
+        selectedLocation: selectedLocationForLegacyFilters
+      })
+  );
+  const selectedElementsRow = selectedTripRows
+    .filter(
+      (row) =>
+        normalize(row.company) === "elementsworld" &&
+        (!vehicle || normalizeVehicleKey(row.vehicle) === normalizeVehicleKey(vehicle))
+    )
+    .reduce((latest, row) => (!latest || compareRowFreshness(row, latest) >= 0 ? row : latest), null);
+  const competitorCandidates = selectedTripRows.filter((row) => {
+      if (normalize(row.company) === "elementsworld") {
+        return false;
+      }
+
+      const normalizedVehicle = normalizeVehicle(row.vehicle);
+      const competitorLookup = normalize(`${row.company} ${normalizedVehicle}`);
+      const competitorVehicleOnlyLookup = normalize(normalizedVehicle);
+
+      return mappedCompetitorTokens.some(
+        (token) =>
+          competitorLookup.includes(token) || competitorVehicleOnlyLookup.includes(token)
+      );
+    });
+
+  const canonicalizedCompetitorCandidates = (() => {
+    const grouped = new Map();
+
+    competitorCandidates.forEach((row) => {
+      const key = [buildCanonicalTripKey(row), row.company, normalizeVehicleName(row.vehicle)].join("|");
+      const lineageKey = [String(row.rawPickupDate || "").trim(), String(row.rawDropoffDate || "").trim()].join("|");
+      const existing = grouped.get(key) || [];
+      existing.push({ row, lineageKey });
+      grouped.set(key, existing);
+    });
+
+    const winners = [];
+    const debug = [];
+
+    grouped.forEach((entries, key) => {
+      const lineageCounts = entries.reduce((acc, entry) => {
+        acc[entry.lineageKey] = (acc[entry.lineageKey] || 0) + 1;
+        return acc;
+      }, {});
+
+      const winnerEntry = entries.reduce((best, candidate) => {
+        if (!best) {
+          return candidate;
+        }
+
+        const bestRawMatch = rowMatchesSelectedRawTripLineage(
+          best.row,
+          selectedPickupDate,
+          selectedDropoffDate
+        );
+        const candidateRawMatch = rowMatchesSelectedRawTripLineage(
+          candidate.row,
+          selectedPickupDate,
+          selectedDropoffDate
+        );
+
+        if (candidateRawMatch && !bestRawMatch) {
+          return candidate;
+        }
+        if (bestRawMatch && !candidateRawMatch) {
+          return best;
+        }
+
+        const freshnessDiff = compareRowFreshness(candidate.row, best.row);
+        if (freshnessDiff > 0) {
+          return candidate;
+        }
+
+        return best;
+      }, null);
+
+      if (winnerEntry) {
+        winners.push(winnerEntry.row);
+        debug.push({
+          key,
+          canonicalTripKey: buildCanonicalTripKey(winnerEntry.row),
+          company: winnerEntry.row.company,
+          vehicle: normalizeVehicleName(winnerEntry.row.vehicle),
+          rawTripKey: winnerEntry.lineageKey,
+          lineageCounts
+        });
+      }
+    });
+
+    return winners;
+  })();
+
+  const latestCompetitorRows = selectLatestCompetitorRows(canonicalizedCompetitorCandidates)
+    .filter(isValidCompetitorPriceRow)
+    .map((row) => {
+      const durationDays = getRowDurationDays(row);
+      const dailyRate =
+        durationDays && Number.isFinite(durationDays) && durationDays > 0
+          ? Math.round(row.price / durationDays)
+          : null;
+
+      return {
+        ...row,
+        normalizedVehicle: normalizeVehicleName(row.vehicle),
+        durationDays,
+        dailyRate
+      };
+    })
+    .sort((left, right) => Number(left.price) - Number(right.price));
+  const finalDisplayRows = buildQuoteTableRows({
+    elementsRow: selectedElementsRow,
+    competitorRows: latestCompetitorRows
   });
-  const quoteRows = competitorQuoteSnapshot.rows;
+  const elementsRow = finalDisplayRows.find((row) => row.isElements) || null;
+  const quoteTableRows = finalDisplayRows;
+  const quoteRows = finalDisplayRows.filter((row) => !row.isElements);
   const showNoTripData = Boolean(
-    selectedDate && selectedDropoff && !exactTripMetrics.hasExactMatch
+    selectedPickupDate && selectedDropoffDate && !exactTripMetrics.hasExactMatch
   );
 
   const activeConfig = vehicleConfigs[vehicle] || vehicleConfigs["trek budget"];
-  const elementsPrice = exactTripMetrics.totalPrice;
-  const validCompetitorRows = competitorQuoteSnapshot.rows.filter(isValidCompetitorPriceRow);
+  const elementsPrice =
+    elementsRow && Number.isFinite(Number(elementsRow.price)) ? Number(elementsRow.price) : null;
+  const validCompetitorRows = quoteRows.filter(isValidCompetitorPriceRow);
   const competitorRows = validCompetitorRows;
   const competitorPrices = validCompetitorRows
     .map((row) => Number(row.price))
     .filter((price) => Number.isFinite(price) && price > 10);
+  const marketAverage = competitorPrices.length ? averageFrom(competitorPrices) : null;
+  const competitorCount = competitorRows.length;
   const cheapestCompetitor =
     competitorPrices.length > 0 ? Math.min(...competitorPrices) : null;
   const highestCompetitor =
@@ -2313,10 +2542,9 @@ function App() {
       : Math.round(recommendationBaselinePrice * (1 + adjustment / 100));
   const recommendationDetail = recommendationReasonMessage;
   const marketGap =
-    elementsPrice !== null && competitorQuoteSnapshot.summary.average !== null
-      ? elementsPrice - competitorQuoteSnapshot.summary.average
+    elementsPrice !== null && marketAverage !== null
+      ? elementsPrice - marketAverage
       : null;
-  const marketAverage = competitorQuoteSnapshot.summary.average;
   const hasMarketAverage =
     marketAverage !== null &&
     marketAverage !== undefined &&
@@ -2353,6 +2581,28 @@ function App() {
     competitorPrices.length <= 1
       ? "Limited market data - only 1 competitor available"
       : `High confidence (${competitorPrices.length} competitors)`;
+  const companyStats = Array.from(
+    competitorRows.reduce((accumulator, row) => {
+      const current = accumulator.get(row.company) || {
+        company: row.company,
+        prices: [],
+        vehicles: new Set()
+      };
+
+      current.prices.push(Number(row.price));
+      current.vehicles.add(row.vehicle);
+      accumulator.set(row.company, current);
+      return accumulator;
+    }, new Map())
+      .values()
+  )
+    .map((entry) => ({
+      company: entry.company,
+      average: averageFrom(entry.prices),
+      vehicles: Array.from(entry.vehicles).join(", "),
+      count: entry.prices.length
+    }))
+    .sort((left, right) => left.average - right.average);
   const recommendedDelta =
     recommendedPrice !== null && hasElementsPrice ? recommendedPrice - Number(elementsPrice) : null;
   const recommendedDeltaPercent =
@@ -2498,6 +2748,43 @@ function App() {
       ? "down"
       : "neutral";
 
+  if (typeof window !== "undefined") {
+    window.__pricingDebug = {
+      selectedPickupDate,
+      selectedDropoffDate,
+      vehicle,
+      selectedTripRows: selectedTripRows.map((row) => ({
+        company: row.company,
+        vehicle: row.vehicle,
+        price: row.price,
+        scrapeDate: row.scrapeDate,
+        pickupLocation: row.pickupLocation,
+        dropoffLocation: row.dropoffLocation,
+        type: row.type,
+        id: row.id
+      })),
+      latestCompetitorRows: latestCompetitorRows.map((row) => ({
+        company: row.company,
+        vehicle: row.vehicle,
+        price: row.price,
+        scrapeDate: row.scrapeDate,
+        pickupLocation: row.pickupLocation,
+        dropoffLocation: row.dropoffLocation,
+        id: row.id
+      })),
+      finalDisplayRows: finalDisplayRows.map((row) => ({
+        company: row.company,
+        vehicle: row.vehicle,
+        price: row.price,
+        isElements: row.isElements,
+        scrapeDate: row.scrapeDate,
+        pickupLocation: row.pickupLocation,
+        dropoffLocation: row.dropoffLocation,
+        id: row.id
+      }))
+    };
+  }
+
   useEffect(() => {
     setIsUiTransitioning(true);
     const timer = window.setTimeout(() => setIsUiTransitioning(false), 220);
@@ -2518,12 +2805,8 @@ function App() {
     );
   }
 
-  const toggleScrapeRoute = (nextRoute) => {
-    setScrapeRoutes((current) =>
-      current.includes(nextRoute)
-        ? current.filter((entry) => entry !== nextRoute)
-        : [...current, nextRoute]
-    );
+  const selectScrapeRoute = (nextRoute) => {
+    setScrapeSelectedRoute(nextRoute);
   };
 
   const refreshDataset = () => {
@@ -2532,25 +2815,40 @@ function App() {
 
   const triggerScrape = async (overrideLocations) => {
     const locationsToRun = overrideLocations || scrapeLocations;
+    const routePairsToRun = overrideLocations
+      ? scrapeRouteOptions.map((option) => {
+          const [pickupLocation, dropoffLocation] = String(option.value).split("->");
+          return { pickupLocation, dropoffLocation };
+        })
+      : scrapeRoutePairs;
 
-    if (!locationsToRun.length) {
+    if (!locationsToRun.length || !routePairsToRun.length) {
       return;
     }
 
     setScrapeSubmitting(true);
 
     try {
+      const requestPayload = {
+        pickupDate: scrapePickupDate,
+        locations: locationsToRun,
+        routePairs: routePairsToRun,
+        maxTripDays: scrapeMaxTripDays,
+        headless: scrapeHeadless
+      };
+      console.log("[SCRAPER][RUN-PAYLOAD]", {
+        selectedRoute: scrapeSelectedRoute,
+        pickupLocation: routePairsToRun[0]?.pickupLocation ?? null,
+        dropoffLocation: routePairsToRun[0]?.dropoffLocation ?? null,
+        routePairs: routePairsToRun,
+        locations: locationsToRun
+      });
       const response = await fetch(`${SCRAPER_API_BASE}/api/runs`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({
-          pickupDate: scrapePickupDate,
-          locations: locationsToRun,
-          maxTripDays: scrapeMaxTripDays,
-          headless: scrapeHeadless
-        })
+        body: JSON.stringify(requestPayload)
       });
 
       const payload = await response.json();
@@ -2627,8 +2925,8 @@ function App() {
                   style={{
                     width: `${Math.min(
                       100,
-                      competitorQuoteSnapshot.summary.average
-                        ? (recommendedPrice / competitorQuoteSnapshot.summary.average) * 65
+                      marketAverage
+                        ? (recommendedPrice / marketAverage) * 65
                         : 0
                     )}%`
                   }}
@@ -2682,82 +2980,20 @@ function App() {
 
             <label className="field">
               <span>Pickup date</span>
-              <div style={{ position: "relative" }}>
-                <input
-                  type="text"
-                  value={formatDisplayDate(selectedDate)}
-                  readOnly
-                  onClick={() => openNativeDatePicker(pickupDateInputRef)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" || event.key === " ") {
-                      event.preventDefault();
-                      openNativeDatePicker(pickupDateInputRef);
-                    }
-                  }}
-                  style={{
-                    width: "100%",
-                    padding: "10px",
-                    borderRadius: "8px",
-                    border: "1px solid #ccc",
-                    cursor: "pointer"
-                  }}
-                />
-                <input
-                  ref={pickupDateInputRef}
-                  type="date"
-                  value={selectedDate}
-                  onChange={handlePickupDateChange}
-                  style={{
-                    position: "absolute",
-                    top: 0,
-                    left: 0,
-                    opacity: 0,
-                    width: 1,
-                    height: 1,
-                    pointerEvents: "none"
-                  }}
-                />
-              </div>
+              <input
+                type="date"
+                value={selectedPickupDate}
+                onChange={handlePickupDateChange}
+              />
             </label>
 
             <label className="field">
               <span>Dropoff date</span>
-              <div style={{ position: "relative" }}>
-                <input
-                  type="text"
-                  value={formatDisplayDate(selectedDropoff)}
-                  readOnly
-                  onClick={() => openNativeDatePicker(dropoffDateInputRef)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" || event.key === " ") {
-                      event.preventDefault();
-                      openNativeDatePicker(dropoffDateInputRef);
-                    }
-                  }}
-                  style={{
-                    width: "100%",
-                    padding: "10px",
-                    borderRadius: "8px",
-                    border: "1px solid #ccc",
-                    cursor: "pointer"
-                  }}
-                />
-                <input
-                  ref={dropoffDateInputRef}
-                  type="date"
-                  value={selectedDropoff}
-                  onChange={handleDropoffDateChange}
-                  style={{
-                    position: "absolute",
-                    top: 0,
-                    left: 0,
-                    opacity: 0,
-                    width: 1,
-                    height: 1,
-                    pointerEvents: "none"
-                  }}
-                />
-              </div>
+              <input
+                type="date"
+                value={selectedDropoffDate}
+                onChange={handleDropoffDateChange}
+              />
             </label>
 
             <label className="field">
@@ -2817,7 +3053,7 @@ function App() {
             <section className="stats-grid">
           <StatCard
             label="Elements Price"
-            value={formatCurrency(exactTripMetrics.totalPrice)}
+            value={formatCurrency(elementsPrice)}
             detail={
               pricingDiffPercent === null
                 ? "vs market avg: Not available"
@@ -2830,10 +3066,11 @@ function App() {
           <StatCard
             label="Duration"
             value={
-              exactTripMetrics.duration !== null &&
-              Number.isFinite(exactTripMetrics.duration) &&
-              exactTripMetrics.duration > 0
-                ? `${exactTripMetrics.duration} days`
+              elementsRow?.durationDays !== null &&
+              elementsRow?.durationDays !== undefined &&
+              Number.isFinite(elementsRow?.durationDays) &&
+              elementsRow?.durationDays > 0
+                ? `${elementsRow.durationDays} days`
                 : "No data"
             }
             detail="Calculated from pickup and dropoff dates"
@@ -2842,9 +3079,9 @@ function App() {
           <StatCard
             label="Daily rate"
             value={
-              exactTripMetrics.dailyRate === null || exactTripMetrics.dailyRate === undefined
+              elementsRow?.dailyRate === null || elementsRow?.dailyRate === undefined
                 ? "No data"
-                : `${formatCurrency(exactTripMetrics.dailyRate)}/day`
+                : `${formatCurrency(elementsRow.dailyRate)}/day`
             }
             detail="Total price divided by trip duration"
             tone="canyon"
@@ -2873,7 +3110,7 @@ function App() {
             />
           <StatCard
             label="Market Average"
-            value={formatCurrency(competitorQuoteSnapshot.summary.average)}
+            value={formatCurrency(marketAverage)}
             detail="Average competitor price for the current quote set"
           />
           <StatCard
@@ -2883,7 +3120,7 @@ function App() {
               highestCompetitorRow
                 ? `${highestCompetitorRow.company} \u2022 ${highestCompetitorRow.vehicle}`
                 : `Based on ${formatCount(
-                    competitorQuoteSnapshot.summary.competitorCount
+                    competitorCount
                   )} competitors`
             }
             tone="amber"
@@ -2948,12 +3185,12 @@ function App() {
                     <div className="chart-empty">{"Loading competitor mix\u2026"}</div>
                   ) : (
                     <MarketSpreadChart
-                      lowest={competitorQuoteSnapshot.summary.lowest}
-                      highest={competitorQuoteSnapshot.summary.highest}
+                      lowest={cheapestCompetitor}
+                      highest={highestCompetitor}
                       recommended={recommendedPrice}
                       elements={elementsPrice}
-                      cheapestRow={competitorQuoteSnapshot.summary.cheapestRow}
-                      highestRow={competitorQuoteSnapshot.summary.highestRow}
+                      cheapestRow={cheapestCompetitorRow}
+                      highestRow={highestCompetitorRow}
                     />
                   )}
                 </div>
@@ -3024,7 +3261,7 @@ function App() {
               ) : (
                 <PriceTrendChart
                   data={trendDashboard.trend}
-                  selectedPickupDate={selectedDate}
+                  selectedPickupDate={selectedPickupDate}
                 />
               )}
             </div>
@@ -3097,8 +3334,8 @@ function App() {
               </div>
             </div>
             <div className="company-list">
-              {competitorQuoteSnapshot.companyStats.length ? (
-                competitorQuoteSnapshot.companyStats.map((company) => (
+              {companyStats.length ? (
+                companyStats.map((company) => (
                   <div key={company.company} className="company-list__item">
                     <div>
                       <strong>{company.company}</strong>
@@ -3330,7 +3567,7 @@ function App() {
                   <span className="control-panel__label">Route selection</span>
                   <div className="chip-row" style={{ gap: "10px" }}>
                     {scrapeRouteOptions.map((entry) => {
-                      const selected = scrapeRoutes.includes(entry.value);
+                      const selected = scrapeSelectedRoute === entry.value;
                       return (
                         <label
                           key={entry.value}
@@ -3348,9 +3585,9 @@ function App() {
                           }}
                         >
                           <input
-                            type="checkbox"
+                            type="radio"
                             checked={selected}
-                            onChange={() => toggleScrapeRoute(entry.value)}
+                            onChange={() => selectScrapeRoute(entry.value)}
                             style={{
                               position: "absolute",
                               opacity: 0,
@@ -3382,7 +3619,7 @@ function App() {
                 <button
                   type="button"
                   className="action-button"
-                  disabled={isScrapeRunActive || !scrapeRoutes.length}
+                  disabled={isScrapeRunActive || !scrapeSelectedRoute}
                   onClick={() => triggerScrape()}
                 >
                   Run price update
