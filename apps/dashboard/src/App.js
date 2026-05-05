@@ -251,11 +251,48 @@ function formatDateDMY(dateStr) {
 
 function formatDisplayDate(dateStr) {
   if (!dateStr) return "";
-  const d = new Date(dateStr);
-  const day = String(d.getDate()).padStart(2, "0");
-  const month = String(d.getMonth() + 1).padStart(2, "0");
-  const year = d.getFullYear();
+  const normalized = toDateKey(dateStr);
+  if (!normalized) return String(dateStr);
+  const [year, month, day] = normalized.split("-");
   return `${day}/${month}/${year}`;
+}
+
+function normalizeInputDate(value) {
+  const trimmed = String(value || "").trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  const isoMatch = trimmed.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (isoMatch) {
+    const [, year, month, day] = isoMatch;
+    const isoDate = `${year.padStart(4, "0")}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+    const parsed = parseDate(isoDate);
+    return parsed ? toDateKey(parsed) : "";
+  }
+
+  const slashMatch = trimmed.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (slashMatch) {
+    const day = Number(slashMatch[1]);
+    const month = Number(slashMatch[2]);
+    const year = Number(slashMatch[3]);
+    const isoDate = `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(
+      day
+    ).padStart(2, "0")}`;
+    const parsed = parseDate(isoDate);
+    if (!parsed) {
+      return "";
+    }
+    const parsedYear = parsed.getFullYear();
+    const parsedMonth = parsed.getMonth() + 1;
+    const parsedDay = parsed.getDate();
+    if (parsedYear !== year || parsedMonth !== month || parsedDay !== day) {
+      return "";
+    }
+    return toDateKey(parsed);
+  }
+
+  return "";
 }
 
 const parseDate = (value) => {
@@ -484,11 +521,39 @@ const dedupeQuoteRows = (rows) => {
 };
 
 const getRowDurationDays = (row) => {
-  if (!row.dateKey || !row.dropoffDateKey) {
+  const pickupDateKey = row?.dateKey || toDateKey(row?.pickupDate || row?.pickup_date || "");
+  const dropoffDateKey = row?.dropoffDateKey || toDateKey(row?.dropoffDate || row?.dropoff_date || "");
+
+  if (!pickupDateKey || !dropoffDateKey) {
     return null;
   }
 
-  return calculateTripDays(parseDate(row.dateKey), parseDate(row.dropoffDateKey));
+  return calculateTripDays(parseDate(pickupDateKey), parseDate(dropoffDateKey));
+};
+
+const calculateDailyRate = (price, durationDays) => {
+  const numericPrice = Number(price);
+  if (!Number.isFinite(numericPrice)) {
+    return null;
+  }
+  if (!Number.isFinite(durationDays) || durationDays <= 0) {
+    return null;
+  }
+  return Math.round(numericPrice / durationDays);
+};
+
+const resolveTrendDailyRate = (row) => {
+  const apiDailyRate = Number(row?.daily_rate ?? row?.apiDailyRate);
+  if (Number.isFinite(apiDailyRate) && apiDailyRate > 0) {
+    return Math.round(apiDailyRate);
+  }
+
+  const durationDays =
+    Number(row?.duration_days) ||
+    Number(row?.durationDays) ||
+    getRowDurationDays(row);
+  const computed = calculateDailyRate(row?.price, durationDays);
+  return Number.isFinite(computed) && computed > 0 ? Math.round(computed) : null;
 };
 
 const getBaselinePrice = (cheapestCompetitorPrice, elementsPrice) => {
@@ -612,10 +677,7 @@ export const buildCompetitorQuoteSnapshot = ({
   const quoteRows = dedupeQuoteRows(validCompetitorRows)
     .map((row) => {
       const durationDays = getRowDurationDays(row);
-      const dailyRate =
-        durationDays && Number.isFinite(durationDays) && durationDays > 0
-          ? Math.round(row.price / durationDays)
-          : null;
+      const dailyRate = calculateDailyRate(row.price, durationDays);
 
       return {
         ...row,
@@ -624,8 +686,10 @@ export const buildCompetitorQuoteSnapshot = ({
         dailyRate
       };
     })
-    .sort((left, right) => Number(left.price) - Number(right.price));
-  const competitorPrices = quoteRows.map((row) => Number(row.price));
+    .sort((left, right) => Number(left.dailyRate ?? Infinity) - Number(right.dailyRate ?? Infinity));
+  const competitorPrices = quoteRows
+    .map((row) => Number(row.dailyRate))
+    .filter((price) => Number.isFinite(price));
   const average =
     competitorPrices.length > 0 ? averageFrom(competitorPrices) : null;
   const cheapestRow = quoteRows.length ? quoteRows[0] : null;
@@ -657,9 +721,9 @@ export const buildCompetitorQuoteSnapshot = ({
     companyStats,
     latestScrapeDate,
     summary: {
-      lowest: cheapestRow ? cheapestRow.price : null,
+      lowest: cheapestRow ? cheapestRow.dailyRate : null,
       average,
-      highest: highestRow ? highestRow.price : null,
+      highest: highestRow ? highestRow.dailyRate : null,
       cheapestRow,
       highestRow,
       competitorCount: quoteRows.length
@@ -680,12 +744,7 @@ export const buildQuoteTableRows = ({
       isElements: true,
       normalizedVehicle: normalizeVehicleName(elementsRow.vehicle),
       durationDays,
-      dailyRate:
-        durationDays &&
-        Number.isFinite(durationDays) &&
-        durationDays > 0
-          ? Math.round(elementsRow.price / durationDays)
-          : null
+      dailyRate: calculateDailyRate(elementsRow.price, durationDays)
     });
   }
 
@@ -705,34 +764,93 @@ export const buildQuoteTableRows = ({
       return 1;
     }
 
-    return Number(left.price) - Number(right.price);
+    return Number(left.dailyRate ?? Infinity) - Number(right.dailyRate ?? Infinity);
   });
 };
 
 
-const collectBucketMetrics = (bucket) => {
-  const elementsRows = bucket?.elementsRows || [];
-  const competitorRows = (bucket?.competitorCandidates || []).filter(isValidCompetitorPriceRow);
-  const competitorPrices = competitorRows.map((row) => row.price);
-  const elementsPrices = elementsRows.map((row) => row.price);
-  const cheapestRow = competitorRows.length
-    ? competitorRows.reduce((min, row) => (row.price < min.price ? row : min))
+const collectBucketMetrics = (bucket, options = {}) => {
+  const {
+    selectedVehicle = "",
+    selectedPickupLocation = "",
+    selectedDropoffLocation = ""
+  } = options;
+  const normalizedVehicleKey = normalizeVehicleKey(selectedVehicle);
+  const normalizedPickupLocation = normalize(selectedPickupLocation);
+  const normalizedDropoffLocation = normalize(selectedDropoffLocation || selectedPickupLocation);
+  const elementsRows = (bucket?.elementsRows || []).filter((row) => {
+    if (normalizedVehicleKey && normalizeVehicleKey(row.vehicle) !== normalizedVehicleKey) {
+      return false;
+    }
+
+    if (!normalizedPickupLocation && !normalizedDropoffLocation) {
+      return true;
+    }
+
+    const rowPickup = normalize(row.pickupLocation || row.location);
+    const rowDropoff = normalize(row.dropoffLocation || row.location);
+    const pickupMatch = !normalizedPickupLocation || rowPickup === normalizedPickupLocation;
+    const dropoffMatch = !normalizedDropoffLocation || rowDropoff === normalizedDropoffLocation;
+    return pickupMatch && dropoffMatch;
+  });
+  const competitorRows = (bucket?.competitorCandidates || [])
+    .filter(isValidCompetitorPriceRow)
+    .map((row) => {
+      const durationDays = getRowDurationDays(row);
+      const trendDailyRate = resolveTrendDailyRate({ ...row, durationDays });
+      return {
+        ...row,
+        durationDays,
+        dailyRate: calculateDailyRate(row.price, durationDays),
+        trendDailyRate
+      };
+    });
+  const competitorRowsWithDailyRate = competitorRows.filter(
+    (row) =>
+      row.trendDailyRate !== null &&
+      row.trendDailyRate !== undefined &&
+      Number.isFinite(Number(row.trendDailyRate))
+  );
+  const competitorPrices = competitorRowsWithDailyRate.map((row) => Number(row.trendDailyRate));
+  const validElementsRows = elementsRows
+    .map((row) => {
+      const durationDays = getRowDurationDays(row);
+      const trendDailyRate = resolveTrendDailyRate({ ...row, durationDays });
+      return {
+        ...row,
+        durationDays,
+        trendDailyRate
+      };
+    })
+    .filter((row) => row.trendDailyRate !== null);
+  const latestElementsRow = validElementsRows.length
+    ? validElementsRows.reduce((latest, row) =>
+        compareScrapeDates(row.scrapeDate, latest.scrapeDate) >= 0 ? row : latest
+      )
     : null;
-  const highestRow = competitorRows.length
-    ? competitorRows.reduce((max, row) => (row.price > max.price ? row : max))
+  const competitorTrendRows = competitorRowsWithDailyRate;
+  const cheapestRow = competitorRowsWithDailyRate.length
+    ? competitorTrendRows.reduce((min, row) =>
+        row.trendDailyRate < min.trendDailyRate ? row : min
+      )
+    : null;
+  const highestRow = competitorRowsWithDailyRate.length
+    ? competitorTrendRows.reduce((max, row) =>
+        row.trendDailyRate > max.trendDailyRate ? row : max
+      )
     : null;
 
   return {
     elementsRows,
     competitorRows,
     competitorPrices,
-    elementsPrices,
+    elementsPrices: validElementsRows.map((row) => row.trendDailyRate),
     cheapestRow,
     highestRow,
-    lowest: cheapestRow ? cheapestRow.price : null,
-    highest: highestRow ? highestRow.price : null,
+    lowest: cheapestRow ? cheapestRow.trendDailyRate : null,
+    highest: highestRow ? highestRow.trendDailyRate : null,
     average: competitorPrices.length ? averageFrom(competitorPrices) : null,
-    elements: elementsPrices.length ? averageFrom(elementsPrices) : null
+    elements: latestElementsRow ? latestElementsRow.trendDailyRate : null
   };
 };
 
@@ -749,13 +867,13 @@ export const calculateRecommendedPrice = (baselinePrice, durationDays, adjustmen
     };
   }
 
-  const recommendedTotalPrice = baselinePrice * (1 + adjustmentPercent / 100);
-  const recommendedDailyRate =
+  const recommendedDailyRate = baselinePrice * (1 + adjustmentPercent / 100);
+  const recommendedTotalPrice =
     durationDays !== null &&
     durationDays !== undefined &&
     Number.isFinite(durationDays) &&
     durationDays > 0
-      ? recommendedTotalPrice / durationDays
+      ? recommendedDailyRate * durationDays
       : null;
 
   return {
@@ -1024,7 +1142,9 @@ export const buildDashboardFromRows = ({
   config,
   adjustment,
   selectedDate = "",
-  selectedVehicle = ""
+  selectedVehicle = "",
+  selectedPickupLocation = "",
+  selectedDropoffLocation = ""
 }) => {
   if (!rows.length) {
     return initialDashboard;
@@ -1039,7 +1159,11 @@ export const buildDashboardFromRows = ({
 
   const sortedDates = Array.from(grouped.keys()).sort();
   const trend = sortedDates.map((dateKey) => {
-    const bucketMetrics = collectBucketMetrics(grouped.get(dateKey));
+    const bucketMetrics = collectBucketMetrics(grouped.get(dateKey), {
+      selectedVehicle,
+      selectedPickupLocation,
+      selectedDropoffLocation
+    });
 
     return {
       cheapestDurationDays: bucketMetrics.cheapestRow
@@ -1054,15 +1178,15 @@ export const buildDashboardFromRows = ({
       recommended: (() => {
         const recommendedPricing = calculateRecommendedPrice(
           bucketMetrics.lowest ?? bucketMetrics.elements,
-          bucketMetrics.cheapestRow ? getRowDurationDays(bucketMetrics.cheapestRow) : null,
+          null,
           adjustment
         );
 
-        return recommendedPricing.recommendedTotalPrice === null ||
-          recommendedPricing.recommendedTotalPrice === undefined ||
-          Number.isNaN(recommendedPricing.recommendedTotalPrice)
+        return recommendedPricing.recommendedDailyRate === null ||
+          recommendedPricing.recommendedDailyRate === undefined ||
+          Number.isNaN(recommendedPricing.recommendedDailyRate)
           ? null
-          : Math.round(recommendedPricing.recommendedTotalPrice);
+          : Math.round(recommendedPricing.recommendedDailyRate);
       })(),
       competitorCount: bucketMetrics.competitorRows.length
     };
@@ -1070,10 +1194,18 @@ export const buildDashboardFromRows = ({
 
   const latestDate = sortedDates.length ? sortedDates[sortedDates.length - 1] : "";
   const selectedMetrics = selectedDate
-    ? collectBucketMetrics(grouped.get(selectedDate))
+    ? collectBucketMetrics(grouped.get(selectedDate), {
+        selectedVehicle,
+        selectedPickupLocation,
+        selectedDropoffLocation
+      })
     : null;
   const latestMetrics = latestDate
-    ? collectBucketMetrics(grouped.get(latestDate))
+    ? collectBucketMetrics(grouped.get(latestDate), {
+        selectedVehicle,
+        selectedPickupLocation,
+        selectedDropoffLocation
+      })
     : null;
 
   let snapshotMetrics = latestMetrics;
@@ -1086,38 +1218,58 @@ export const buildDashboardFromRows = ({
     displayDate = selectedDate;
   } else if (!latestRows.length) {
     latestRows = sortedDates.flatMap((dateKey) => {
-      const bucketMetrics = collectBucketMetrics(grouped.get(dateKey));
+      const bucketMetrics = collectBucketMetrics(grouped.get(dateKey), {
+        selectedVehicle,
+        selectedPickupLocation,
+        selectedDropoffLocation
+      });
       return bucketMetrics.competitorRows;
     });
     snapshotMetrics = {
       elementsRows: sortedDates.flatMap((dateKey) => {
-        const bucketMetrics = collectBucketMetrics(grouped.get(dateKey));
+        const bucketMetrics = collectBucketMetrics(grouped.get(dateKey), {
+          selectedVehicle,
+          selectedPickupLocation,
+          selectedDropoffLocation
+        });
         return bucketMetrics.elementsRows;
       }),
       elementsPrices: sortedDates.flatMap((dateKey) => {
-        const bucketMetrics = collectBucketMetrics(grouped.get(dateKey));
+        const bucketMetrics = collectBucketMetrics(grouped.get(dateKey), {
+          selectedVehicle,
+          selectedPickupLocation,
+          selectedDropoffLocation
+        });
         return bucketMetrics.elementsPrices;
       })
     };
     displayDate = latestDate || "";
   }
 
+  latestRows = latestRows.map((row) => ({
+    ...row,
+    durationDays: getRowDurationDays(row),
+    dailyRate: calculateDailyRate(row.price, getRowDurationDays(row))
+  }));
+
   latestRows.sort((left, right) => {
     if (left.dateKey !== right.dateKey) {
       return left.dateKey.localeCompare(right.dateKey);
     }
 
-    return left.price - right.price;
+    return (left.dailyRate ?? Infinity) - (right.dailyRate ?? Infinity);
   });
 
-  const competitorPrices = latestRows.map((row) => row.price);
+  const competitorPrices = latestRows
+    .map((row) => calculateDailyRate(row.price, getRowDurationDays(row)))
+    .filter((rate) => rate !== null);
   const hasCompetitors = competitorPrices.length > 0;
   const latestAverage = hasCompetitors ? averageFrom(competitorPrices) : null;
   let latestElements = snapshotMetrics?.elementsRows
     ?.filter((row) => (selectedVehicle ? isSameVehicle(row.vehicle, selectedVehicle) : true))
-    .map((row) => row.price);
+    .map((row) => calculateDailyRate(row.price, getRowDurationDays(row)));
   latestElements = latestElements?.length
-    ? averageFrom(latestElements)
+    ? averageFrom(latestElements.filter((rate) => rate !== null))
     : null;
   let fallbackDate = null;
 
@@ -1129,19 +1281,24 @@ export const buildDashboardFromRows = ({
       fallbackDate = fallback.date;
     }
   }
-  const cheapestRow = latestRows.length
-    ? latestRows.reduce((min, row) => (row.price < min.price ? row : min))
+  const latestRowsWithDailyRate = latestRows.filter((row) => row.dailyRate !== null);
+  const cheapestRow = latestRowsWithDailyRate.length
+    ? latestRowsWithDailyRate.reduce((min, row) => (row.dailyRate < min.dailyRate ? row : min))
     : null;
-  const highestRow = latestRows.length
-    ? latestRows.reduce((max, row) => (row.price > max.price ? row : max))
+  const highestRow = latestRowsWithDailyRate.length
+    ? latestRowsWithDailyRate.reduce((max, row) => (row.dailyRate > max.dailyRate ? row : max))
     : null;
-  const lowest = cheapestRow ? cheapestRow.price : null;
-  const highest = highestRow ? highestRow.price : null;
+  const lowest = cheapestRow ? cheapestRow.dailyRate : null;
+  const highest = highestRow ? highestRow.dailyRate : null;
   const elementsPrice = latestElements;
   const recommendationBaseline = getBaselinePrice(lowest, elementsPrice);
   const recommendedPricing = calculateRecommendedPrice(
     recommendationBaseline.baselinePrice,
-    cheapestRow ? getRowDurationDays(cheapestRow) : null,
+    cheapestRow
+      ? cheapestRow.durationDays
+      : snapshotMetrics?.elementsRows?.[0]
+      ? getRowDurationDays(snapshotMetrics.elementsRows[0])
+      : null,
     adjustment
   );
   const recommended =
@@ -1300,8 +1457,13 @@ function FilterChip({ active, children, onClick }) {
   );
 }
 
-function PriceTrendChart({ data, selectedPickupDate = "" }) {
+function PriceTrendChart({ data, selectedPickupDate = "", onActiveDateChange = null }) {
   const [hoveredDateKey, setHoveredDateKey] = useState("");
+  useEffect(() => {
+    if (typeof onActiveDateChange === "function") {
+      onActiveDateChange(hoveredDateKey || "");
+    }
+  }, [hoveredDateKey, onActiveDateChange]);
 
   return (
     <ParentSize debounceTime={10}>
@@ -1581,14 +1743,6 @@ function PriceTrendChart({ data, selectedPickupDate = "" }) {
               ) : (
                 <>
                   <LinePath
-                    data={elementsData}
-                    curve={curveMonotoneX}
-                    x={(item) => xScale(item.dateKey) ?? 0}
-                    y={(item) => yScale(item.elements)}
-                    stroke="#2d6a4f"
-                    strokeWidth={3}
-                  />
-                  <LinePath
                     data={lowestData}
                     curve={curveMonotoneX}
                     x={(item) => xScale(item.dateKey) ?? 0}
@@ -1613,6 +1767,14 @@ function PriceTrendChart({ data, selectedPickupDate = "" }) {
                     strokeWidth={2}
                     strokeDasharray="8 8"
                   />
+                  <LinePath
+                    data={elementsData}
+                    curve={curveMonotoneX}
+                    x={(item) => xScale(item.dateKey) ?? 0}
+                    y={(item) => yScale(item.elements)}
+                    stroke="#2d6a4f"
+                    strokeWidth={3.5}
+                  />
 
                   {data.map((item) => {
                     const x = xScale(item.dateKey) ?? 0;
@@ -1635,7 +1797,7 @@ function PriceTrendChart({ data, selectedPickupDate = "" }) {
                           <circle cx={x} cy={yScale(item.highest)} r={4} fill="#d8a15d" />
                         ) : null}
                         {item.elements !== null ? (
-                          <circle cx={x} cy={yScale(item.elements)} r={4} fill="#2d6a4f" />
+                          <circle cx={x} cy={yScale(item.elements)} r={5} fill="#2d6a4f" />
                         ) : null}
                       </g>
                     );
@@ -1898,6 +2060,7 @@ function MarketSpreadChart({
 function App() {
   const [rows, setRows] = useState([]);
   const [trendData, setTrendData] = useState([]);
+  const [trendActiveDateKey, setTrendActiveDateKey] = useState("");
   const [activeTab, setActiveTab] = useState("overview");
   const [isUiTransitioning, setIsUiTransitioning] = useState(false);
   const [vehicle, setVehicle] = useState("");
@@ -1909,6 +2072,8 @@ function App() {
   const [appliedDropoffLocation, setAppliedDropoffLocation] = useState("");
   const [selectedPickupDate, setSelectedPickupDate] = useState("");
   const [selectedDropoffDate, setSelectedDropoffDate] = useState("");
+  const [pickupDateInputValue, setPickupDateInputValue] = useState("");
+  const [dropoffDateInputValue, setDropoffDateInputValue] = useState("");
   const [isDropoffUserSelected, setIsDropoffUserSelected] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
@@ -1918,12 +2083,14 @@ function App() {
     new Date().toISOString().slice(0, 10)
   );
   const [scrapeMaxTripDays, setScrapeMaxTripDays] = useState(30);
-  const [scrapeSelectedRoute, setScrapeSelectedRoute] = useState("auckland->auckland");
+  const [scrapeSelectedRoutes, setScrapeSelectedRoutes] = useState(["auckland->auckland"]);
   const [scrapeHeadless, setScrapeHeadless] = useState(true);
   const [scrapeSubmitting, setScrapeSubmitting] = useState(false);
   const [scraperStatus, setScraperStatus] = useState(initialScraperStatus);
   const [dataReloadTrigger, setDataReloadTrigger] = useState(0);
   const [scrapeRunFeedback, setScrapeRunFeedback] = useState("");
+  const pickupDateInputRef = useRef(null);
+  const dropoffDateInputRef = useRef(null);
   const scrapePickupDateInputRef = useRef(null);
 
   const selectedLocationForLegacyFilters = appliedPickupLocation || location;
@@ -1935,25 +2102,63 @@ function App() {
   const pickupDate = selectedPickupDate;
   const dropoffDate = selectedDropoffDate;
   const scrapeLocations = useMemo(() => {
-    const selectedRoute = scrapeRouteOptions.find(
-      (option) => option.value === scrapeSelectedRoute
+    const selected = scrapeRouteOptions.filter((option) =>
+      scrapeSelectedRoutes.includes(option.value)
     );
-    return selectedRoute ? [...selectedRoute.locations] : [];
-  }, [scrapeSelectedRoute]);
+    return Array.from(new Set(selected.flatMap((option) => option.locations)));
+  }, [scrapeSelectedRoutes]);
   const scrapeRoutePairs = useMemo(() => {
-    const [pickupLocation, dropoffLocation] = String(scrapeSelectedRoute).split("->");
-    if (!pickupLocation || !dropoffLocation) {
-      return [];
-    }
-    return [{ pickupLocation, dropoffLocation }];
-  }, [scrapeSelectedRoute]);
+    return scrapeSelectedRoutes
+      .map((routeValue) => {
+        const [pickupLocation, dropoffLocation] = String(routeValue).split("->");
+        if (!pickupLocation || !dropoffLocation) {
+          return null;
+        }
+        return { pickupLocation, dropoffLocation };
+      })
+      .filter(Boolean);
+  }, [scrapeSelectedRoutes]);
   const handlePickupDateChange = (event) => {
-    setSelectedPickupDate(event.target.value);
+    const normalized = normalizeInputDate(event.target.value);
+    setSelectedPickupDate(normalized);
+    setPickupDateInputValue(formatDisplayDate(normalized));
     setIsDropoffUserSelected(false);
   };
   const handleDropoffDateChange = (event) => {
-    setSelectedDropoffDate(event.target.value);
+    const normalized = normalizeInputDate(event.target.value);
+    setSelectedDropoffDate(normalized);
+    setDropoffDateInputValue(formatDisplayDate(normalized));
     setIsDropoffUserSelected(true);
+  };
+  const handlePickupDateInputChange = (event) => {
+    const rawValue = event.target.value;
+    setPickupDateInputValue(rawValue);
+    const normalized = normalizeInputDate(rawValue);
+    if (!rawValue.trim()) {
+      setSelectedPickupDate("");
+      setIsDropoffUserSelected(false);
+      return;
+    }
+    if (normalized) {
+      setSelectedPickupDate(normalized);
+      setPickupDateInputValue(formatDisplayDate(normalized));
+      setIsDropoffUserSelected(false);
+    }
+  };
+  const handleDropoffDateInputChange = (event) => {
+    const rawValue = event.target.value;
+    setDropoffDateInputValue(rawValue);
+    const normalized = normalizeInputDate(rawValue);
+    if (!rawValue.trim()) {
+      setSelectedDropoffDate("");
+      setIsDropoffUserSelected(true);
+      return;
+    }
+    if (normalized) {
+      setSelectedDropoffDate(normalized);
+      setDropoffDateInputValue(formatDisplayDate(normalized));
+      setIsDropoffUserSelected(true);
+    }
   };
   const handlePickupLocationChange = (event) => {
     const nextPickupLocation = event.target.value;
@@ -1991,6 +2196,14 @@ function App() {
       // no-op
     }
   };
+
+  useEffect(() => {
+    setPickupDateInputValue(formatDisplayDate(selectedPickupDate));
+  }, [selectedPickupDate]);
+
+  useEffect(() => {
+    setDropoffDateInputValue(formatDisplayDate(selectedDropoffDate));
+  }, [selectedDropoffDate]);
 
   useEffect(() => {
     if (appliedPickupLocation) {
@@ -2244,6 +2457,13 @@ function App() {
 
     trendData.forEach((row) => {
       if (selectedLocationForLegacyFilters && row.location !== selectedLocationForLegacyFilters) {
+        const isElementsRow = normalize(row.company) === "elementsworld";
+        const matchesElementsLocation =
+          normalize(row.pickupLocation || row.location) === selectedLocationForLegacyFilters ||
+          normalize(row.dropoffLocation || row.location) === selectedLocationForLegacyFilters;
+        if (isElementsRow && matchesElementsLocation) {
+          relevantTrendRows.push(row);
+        }
         return;
       }
 
@@ -2258,10 +2478,21 @@ function App() {
         config,
         adjustment,
         selectedDate: selectedPickupDate,
-        selectedVehicle: vehicle
+        selectedVehicle: vehicle,
+        selectedPickupLocation: appliedPickupLocation,
+        selectedDropoffLocation: appliedDropoffLocation || appliedPickupLocation
       })
     );
-  }, [adjustment, selectedLocationForLegacyFilters, trendData, selectedPickupDate, selectedDropoffDate, vehicle]);
+  }, [
+    adjustment,
+    selectedLocationForLegacyFilters,
+    trendData,
+    selectedPickupDate,
+    selectedDropoffDate,
+    vehicle,
+    appliedPickupLocation,
+    appliedDropoffLocation
+  ]);
 
   const dropoffOptions = Array.from(
     new Set(
@@ -2450,10 +2681,7 @@ function App() {
     .filter(isValidCompetitorPriceRow)
     .map((row) => {
       const durationDays = getRowDurationDays(row);
-      const dailyRate =
-        durationDays && Number.isFinite(durationDays) && durationDays > 0
-          ? Math.round(row.price / durationDays)
-          : null;
+      const dailyRate = calculateDailyRate(row.price, durationDays);
 
       return {
         ...row,
@@ -2462,7 +2690,7 @@ function App() {
         dailyRate
       };
     })
-    .sort((left, right) => Number(left.price) - Number(right.price));
+    .sort((left, right) => Number(left.dailyRate ?? Infinity) - Number(right.dailyRate ?? Infinity));
   const finalDisplayRows = buildQuoteTableRows({
     elementsRow: selectedElementsRow,
     competitorRows: latestCompetitorRows
@@ -2479,31 +2707,32 @@ function App() {
     elementsRow && Number.isFinite(Number(elementsRow.price)) ? Number(elementsRow.price) : null;
   const validCompetitorRows = quoteRows.filter(isValidCompetitorPriceRow);
   const competitorRows = validCompetitorRows;
-  const competitorPrices = validCompetitorRows
-    .map((row) => Number(row.price))
+  const competitorDailyRates = validCompetitorRows
+    .map((row) => Number(row.dailyRate))
     .filter((price) => Number.isFinite(price) && price > 10);
-  const marketAverage = competitorPrices.length ? averageFrom(competitorPrices) : null;
+  const marketAverage = competitorDailyRates.length ? averageFrom(competitorDailyRates) : null;
   const competitorCount = competitorRows.length;
   const cheapestCompetitor =
-    competitorPrices.length > 0 ? Math.min(...competitorPrices) : null;
+    competitorDailyRates.length > 0 ? Math.min(...competitorDailyRates) : null;
   const highestCompetitor =
-    competitorPrices.length > 0 ? Math.max(...competitorPrices) : null;
+    competitorDailyRates.length > 0 ? Math.max(...competitorDailyRates) : null;
   const cheapestCompetitorRow =
-    competitorPrices.length > 0
+    competitorDailyRates.length > 0
       ? competitorRows.reduce((min, row) =>
-          Number(row.price) < Number(min.price) ? row : min
+          Number(row.dailyRate) < Number(min.dailyRate) ? row : min
         )
       : null;
   const highestCompetitorRow =
-    competitorPrices.length > 0
+    competitorDailyRates.length > 0
       ? competitorRows.reduce((max, row) =>
-          Number(row.price) > Number(max.price) ? row : max
+          Number(row.dailyRate) > Number(max.dailyRate) ? row : max
         )
       : null;
+  const elementsDailyRate = elementsRow?.dailyRate ?? null;
   const hasElementsPrice =
     elementsPrice !== null && elementsPrice !== undefined && !Number.isNaN(elementsPrice);
-  const hasCompetitorData = competitorPrices.length > 0;
-  const hasCompetitors = competitorPrices.length > 0;
+  const hasCompetitorData = competitorDailyRates.length > 0;
+  const hasCompetitors = competitorDailyRates.length > 0;
   let recommendationBaselinePrice = null;
   let recommendationReasonMessage = "No competitor data available. Using Elements price as fallback";
   let recommendationSource = null;
@@ -2518,13 +2747,17 @@ function App() {
       recommendationReasonMessage = "Using cheapest competitor as baseline";
       recommendationSource = "competitor";
     } else {
-      recommendationBaselinePrice = hasElementsPrice ? elementsPrice : null;
+      recommendationBaselinePrice =
+        elementsDailyRate !== null && elementsDailyRate !== undefined
+          ? elementsDailyRate
+          : null;
       recommendationReasonMessage =
         "All competitors priced above Elements. Using Elements price as baseline";
       recommendationSource = hasElementsPrice ? "elements" : null;
     }
   } else {
-    recommendationBaselinePrice = hasElementsPrice ? elementsPrice : null;
+    recommendationBaselinePrice =
+      elementsDailyRate !== null && elementsDailyRate !== undefined ? elementsDailyRate : null;
     recommendationReasonMessage = "No competitor data available. Using Elements price as fallback";
     recommendationSource = hasElementsPrice ? "elements" : null;
   }
@@ -2534,16 +2767,30 @@ function App() {
   const competitorStatusMessage = hasCompetitorData
     ? "No competitors cheaper than Elements"
     : "No competitor data available for selected date";
+  const recommendedPricing = calculateRecommendedPrice(
+    recommendationBaselinePrice,
+    elementsRow?.durationDays ?? null,
+    adjustment
+  );
+  const recommendedDailyRate =
+    recommendedPricing.recommendedDailyRate === null ||
+    recommendedPricing.recommendedDailyRate === undefined ||
+    Number.isNaN(recommendedPricing.recommendedDailyRate)
+      ? null
+      : Math.round(recommendedPricing.recommendedDailyRate);
   const recommendedPrice =
     recommendationBaselinePrice === null ||
-    recommendationBaselinePrice === undefined ||
-    Number.isNaN(recommendationBaselinePrice)
+    recommendationBaselinePrice === undefined
       ? null
-      : Math.round(recommendationBaselinePrice * (1 + adjustment / 100));
+      : recommendedPricing.recommendedTotalPrice === null ||
+        recommendedPricing.recommendedTotalPrice === undefined ||
+        Number.isNaN(recommendedPricing.recommendedTotalPrice)
+      ? null
+      : Math.round(recommendedPricing.recommendedTotalPrice);
   const recommendationDetail = recommendationReasonMessage;
   const marketGap =
-    elementsPrice !== null && marketAverage !== null
-      ? elementsPrice - marketAverage
+    elementsDailyRate !== null && marketAverage !== null
+      ? elementsDailyRate - marketAverage
       : null;
   const hasMarketAverage =
     marketAverage !== null &&
@@ -2551,36 +2798,36 @@ function App() {
     !Number.isNaN(marketAverage) &&
     marketAverage !== 0;
   const pricingDiffPercent =
-    hasElementsPrice && hasMarketAverage
-      ? ((elementsPrice - marketAverage) / marketAverage) * 100
+    elementsDailyRate !== null && elementsDailyRate !== undefined && hasMarketAverage
+      ? ((elementsDailyRate - marketAverage) / marketAverage) * 100
       : null;
   const pricingPositioningInsight =
     pricingDiffPercent === null
       ? "Pricing position unavailable for this selection"
       : pricingDiffPercent < 0
-      ? `Elements is underpriced by ${formatPercentValue(pricingDiffPercent)} compared to market`
+      ? `Elements is ${formatPercentValue(Math.abs(pricingDiffPercent))} below the competitor daily average.`
       : pricingDiffPercent > 0
-      ? `Elements is overpriced by ${formatPercentValue(pricingDiffPercent)}`
-      : "Elements is priced in line with market";
+      ? `Elements is ${formatPercentValue(Math.abs(pricingDiffPercent))} above the competitor daily average.`
+      : "Elements is priced in line with the competitor daily average.";
   const actionThresholdPercent = 5;
   const recommendedActionInsight =
     pricingDiffPercent === null
       ? "Maintain current price"
       : pricingDiffPercent <= -actionThresholdPercent
-      ? `Increase price by ${formatPercentValue(pricingDiffPercent)}`
+      ? `Increase daily rate by ${formatPercentValue(Math.abs(pricingDiffPercent))}`
       : pricingDiffPercent >= actionThresholdPercent
-      ? `Reduce price by ${formatPercentValue(pricingDiffPercent)}`
-      : "Maintain current price";
+      ? `Reduce daily rate by ${formatPercentValue(Math.abs(pricingDiffPercent))}`
+      : "Maintain current daily rate";
   const marketRangeInsight =
-    competitorPrices.length === 0
+    competitorDailyRates.length === 0
       ? "No competitor data available for selected date"
-      : cheapestCompetitor === highestCompetitor
-      ? `Market price: ${formatCurrency(cheapestCompetitor)}`
-      : `Market price range: ${formatCurrency(cheapestCompetitor)} - ${formatCurrency(highestCompetitor)}`;
+    : cheapestCompetitor === highestCompetitor
+      ? `Market daily rate: ${formatCurrency(cheapestCompetitor)}/day`
+      : `Market daily rate range: ${formatCurrency(cheapestCompetitor)}/day - ${formatCurrency(highestCompetitor)}/day`;
   const confidenceMessage =
-    competitorPrices.length <= 1
+    competitorDailyRates.length <= 1
       ? "Limited market data - only 1 competitor available"
-      : `High confidence (${competitorPrices.length} competitors)`;
+      : `High confidence (${competitorDailyRates.length} competitors)`;
   const companyStats = Array.from(
     competitorRows.reduce((accumulator, row) => {
       const current = accumulator.get(row.company) || {
@@ -2589,7 +2836,7 @@ function App() {
         vehicles: new Set()
       };
 
-      current.prices.push(Number(row.price));
+      current.prices.push(Number(row.dailyRate));
       current.vehicles.add(row.vehicle);
       accumulator.set(row.company, current);
       return accumulator;
@@ -2604,18 +2851,22 @@ function App() {
     }))
     .sort((left, right) => left.average - right.average);
   const recommendedDelta =
-    recommendedPrice !== null && hasElementsPrice ? recommendedPrice - Number(elementsPrice) : null;
+    recommendedDailyRate !== null &&
+    elementsDailyRate !== null &&
+    elementsDailyRate !== undefined
+      ? recommendedDailyRate - Number(elementsDailyRate)
+      : null;
   const recommendedDeltaPercent =
-    recommendedDelta !== null && hasElementsPrice && Number(elementsPrice) !== 0
-      ? (recommendedDelta / Number(elementsPrice)) * 100
+    recommendedDelta !== null && elementsDailyRate !== null && Number(elementsDailyRate) !== 0
+      ? (recommendedDelta / Number(elementsDailyRate)) * 100
       : null;
   const recommendedActionText =
-    recommendedPrice === null
+    recommendedDailyRate === null
       ? "No recommendation available"
       : recommendedDelta === null || Math.abs(recommendedDelta) < 0.5
-      ? `Maintain price at ${formatCurrency(recommendedPrice)} (0.0%)`
-      : `${recommendedDelta > 0 ? "Increase" : "Decrease"} price to ${formatCurrency(
-          recommendedPrice
+      ? `Maintain daily rate at ${formatCurrency(recommendedDailyRate)}/day (0.0%)`
+      : `${recommendedDelta > 0 ? "Increase" : "Decrease"} daily rate to ${formatCurrency(
+          recommendedDailyRate
         )} (${recommendedDeltaPercent > 0 ? "+" : ""}${formatPercentValue(
           recommendedDeltaPercent
         )})`;
@@ -2708,15 +2959,43 @@ function App() {
     }).format(new Date(`${toMonth.key}-01T00:00:00`));
 
     if (changePercent > 0) {
-      return `Prices increased from ${fromLabel} to ${toLabel} by ${formatPercentValue(changePercent)}`;
+      return `Daily market rates increased from ${fromLabel} to ${toLabel} by ${formatPercentValue(changePercent)}`;
     }
 
     if (changePercent < 0) {
-      return `Prices decreased from ${fromLabel} to ${toLabel} by ${formatPercentValue(changePercent)}`;
+      return `Daily market rates decreased from ${fromLabel} to ${toLabel} by ${formatPercentValue(changePercent)}`;
     }
 
-    return `Prices were unchanged from ${fromLabel} to ${toLabel}`;
+    return `Daily market rates were unchanged from ${fromLabel} to ${toLabel}`;
   })();
+  const trendSelectedPoint = selectedPickupDate
+    ? trendDashboard.trend.find((item) => item.dateKey === selectedPickupDate) || null
+    : null;
+  const trendHoveredPoint = trendActiveDateKey
+    ? trendDashboard.trend.find((item) => item.dateKey === trendActiveDateKey) || null
+    : null;
+  const trendLatestPoint = trendDashboard.trend.length
+    ? trendDashboard.trend[trendDashboard.trend.length - 1]
+    : null;
+  const trendDecisionPoint = trendHoveredPoint || trendSelectedPoint || trendLatestPoint;
+  const trendCheapestRate = trendDecisionPoint?.lowest ?? null;
+  const trendHighestRate = trendDecisionPoint?.highest ?? null;
+  const trendRecommendedRate = trendDecisionPoint?.recommended ?? null;
+  const trendElementsRate = trendDecisionPoint?.elements ?? null;
+  const trendDecisionMarketAverage =
+    trendCheapestRate !== null &&
+    trendCheapestRate !== undefined &&
+    trendHighestRate !== null &&
+    trendHighestRate !== undefined
+      ? averageFrom([trendCheapestRate, trendHighestRate])
+      : trendCheapestRate ?? trendHighestRate ?? null;
+  const trendDecisionGap =
+    trendElementsRate !== null &&
+    trendElementsRate !== undefined &&
+    trendDecisionMarketAverage !== null &&
+    trendDecisionMarketAverage !== undefined
+      ? trendElementsRate - trendDecisionMarketAverage
+      : null;
   const latestRun = scraperStatus.latestRun;
   const isScrapeRunActive =
     scrapeSubmitting ||
@@ -2732,14 +3011,14 @@ function App() {
       : "";
   const cheapestQuoteRow = quoteTableRows.find((row) => !row.isElements) || null;
   const cheapestCompetitorPrice =
-    cheapestQuoteRow && Number.isFinite(Number(cheapestQuoteRow.price))
-      ? Number(cheapestQuoteRow.price)
+    cheapestQuoteRow && Number.isFinite(Number(cheapestQuoteRow.dailyRate))
+      ? Number(cheapestQuoteRow.dailyRate)
       : null;
   const highestQuoteRow =
     quoteTableRows.length > 0
       ? [...quoteTableRows]
           .filter((row) => !row.isElements)
-          .sort((left, right) => Number(right.price) - Number(left.price))[0] || null
+          .sort((left, right) => Number(right.dailyRate) - Number(left.dailyRate))[0] || null
       : null;
   const actionTone =
     recommendedActionInsight.startsWith("Increase")
@@ -2805,24 +3084,24 @@ function App() {
     );
   }
 
-  const selectScrapeRoute = (nextRoute) => {
-    setScrapeSelectedRoute(nextRoute);
+  const toggleScrapeRoute = (nextRoute) => {
+    setScrapeSelectedRoutes((current) =>
+      current.includes(nextRoute)
+        ? current.filter((route) => route !== nextRoute)
+        : [...current, nextRoute]
+    );
   };
 
   const refreshDataset = () => {
     setDataReloadTrigger((current) => current + 1);
   };
 
-  const triggerScrape = async (overrideLocations) => {
-    const locationsToRun = overrideLocations || scrapeLocations;
-    const routePairsToRun = overrideLocations
-      ? scrapeRouteOptions.map((option) => {
-          const [pickupLocation, dropoffLocation] = String(option.value).split("->");
-          return { pickupLocation, dropoffLocation };
-        })
-      : scrapeRoutePairs;
+  const triggerScrape = async () => {
+    const locationsToRun = scrapeLocations;
+    const routePairsToRun = scrapeRoutePairs;
 
     if (!locationsToRun.length || !routePairsToRun.length) {
+      setScrapeRunFeedback("Select at least one route combination");
       return;
     }
 
@@ -2837,7 +3116,7 @@ function App() {
         headless: scrapeHeadless
       };
       console.log("[SCRAPER][RUN-PAYLOAD]", {
-        selectedRoute: scrapeSelectedRoute,
+        selectedRoutes: scrapeSelectedRoutes,
         pickupLocation: routePairsToRun[0]?.pickupLocation ?? null,
         dropoffLocation: routePairsToRun[0]?.dropoffLocation ?? null,
         routePairs: routePairsToRun,
@@ -2912,7 +3191,7 @@ function App() {
           <aside className="hero-highlight">
             <p className="hero-highlight__label">Pricing posture</p>
             <strong>
-              {recommendedPrice === null ? "N/A" : formatCurrency(recommendedPrice)}
+              {recommendedDailyRate === null ? "N/A" : `${formatCurrency(recommendedDailyRate)}/day`}
             </strong>
             <p className="hero-highlight__detail">
               {recommendationDetail}
@@ -2925,8 +3204,8 @@ function App() {
                   style={{
                     width: `${Math.min(
                       100,
-                      marketAverage
-                        ? (recommendedPrice / marketAverage) * 65
+                      marketAverage && recommendedDailyRate
+                        ? (recommendedDailyRate / marketAverage) * 65
                         : 0
                     )}%`
                   }}
@@ -2980,20 +3259,72 @@ function App() {
 
             <label className="field">
               <span>Pickup date</span>
-              <input
-                type="date"
-                value={selectedPickupDate}
-                onChange={handlePickupDateChange}
-              />
+              <div style={{ position: "relative" }}>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  placeholder="DD/MM/YYYY"
+                  value={pickupDateInputValue}
+                  onChange={handlePickupDateInputChange}
+                  onClick={() => openNativeDatePicker(pickupDateInputRef)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      openNativeDatePicker(pickupDateInputRef);
+                    }
+                  }}
+                />
+                <input
+                  ref={pickupDateInputRef}
+                  type="date"
+                  value={selectedPickupDate}
+                  onChange={handlePickupDateChange}
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    opacity: 0,
+                    width: 1,
+                    height: 1,
+                    pointerEvents: "none"
+                  }}
+                />
+              </div>
             </label>
 
             <label className="field">
               <span>Dropoff date</span>
-              <input
-                type="date"
-                value={selectedDropoffDate}
-                onChange={handleDropoffDateChange}
-              />
+              <div style={{ position: "relative" }}>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  placeholder="DD/MM/YYYY"
+                  value={dropoffDateInputValue}
+                  onChange={handleDropoffDateInputChange}
+                  onClick={() => openNativeDatePicker(dropoffDateInputRef)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      openNativeDatePicker(dropoffDateInputRef);
+                    }
+                  }}
+                />
+                <input
+                  ref={dropoffDateInputRef}
+                  type="date"
+                  value={selectedDropoffDate}
+                  onChange={handleDropoffDateChange}
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    opacity: 0,
+                    width: 1,
+                    height: 1,
+                    pointerEvents: "none"
+                  }}
+                />
+              </div>
             </label>
 
             <label className="field">
@@ -3042,7 +3373,7 @@ function App() {
             </section>
           ) : null}
 
-          {competitorPrices.length === 0 ? (
+          {competitorDailyRates.length === 0 ? (
             <section className="panel">
               <p>No competitor data available for selected date</p>
             </section>
@@ -3087,18 +3418,18 @@ function App() {
             tone="canyon"
           />
           <StatCard
-            label="💡 Recommended price"
+            label="Recommended daily rate"
             value={
-              recommendedPrice === null ? "N/A" : formatCurrency(recommendedPrice)
+              recommendedDailyRate === null ? "N/A" : `${formatCurrency(recommendedDailyRate)}/day`
             }
-            detail="AI suggestion based on current market baseline"
+            detail="AI suggestion based on competitor daily-rate baseline"
             tone="recommended"
           />
             <StatCard
-              label="Lowest market (competitor) price"
-              value={formatCurrency(cheapestCompetitor)}
+              label="Lowest market (competitor) daily rate"
+              value={cheapestCompetitor === null ? "No data" : `${formatCurrency(cheapestCompetitor)}/day`}
               detail={
-                competitorPrices.length === 0
+                competitorDailyRates.length === 0
                   ? "No competitor data available for selected date"
                   : noCompetitorsCheaperThanElements
                   ? "No competitors cheaper than Elements"
@@ -3109,13 +3440,13 @@ function App() {
               tone="canyon"
             />
           <StatCard
-            label="Market Average"
-            value={formatCurrency(marketAverage)}
-            detail="Average competitor price for the current quote set"
+            label="Daily market average"
+            value={marketAverage === null ? "No data" : `${formatCurrency(marketAverage)}/day`}
+            detail="Average competitor daily rate for the current quote set"
           />
           <StatCard
-            label="Highest competitor price"
-            value={formatCurrency(highestCompetitor)}
+            label="Highest competitor daily rate"
+            value={highestCompetitor === null ? "No data" : `${formatCurrency(highestCompetitor)}/day`}
             detail={
               highestCompetitorRow
                 ? `${highestCompetitorRow.company} \u2022 ${highestCompetitorRow.vehicle}`
@@ -3144,9 +3475,17 @@ function App() {
 
               <article className="insight-card">
                 <span className="insight-card__label">Rate signal</span>
-                <h2>{formatCurrency(cheapestCompetitor)} cheapest competitor</h2>
+                <h2>
+                  {cheapestCompetitor === null
+                    ? "No competitor daily-rate signal"
+                    : `${formatCurrency(cheapestCompetitor)}/day cheapest competitor`}
+                </h2>
                 <p>
-                  Current guidance lands at {formatCurrency(recommendedPrice)},{" "}
+                  Current guidance lands at{" "}
+                  {recommendedDailyRate === null
+                    ? "N/A"
+                    : `${formatCurrency(recommendedDailyRate)}/day`}
+                  ,{" "}
                   {recommendationSource === "competitor"
                     ? "anchored to the cheapest observed competitor for this selection."
                     : recommendationSource === "elements" && hasCompetitors
@@ -3169,7 +3508,7 @@ function App() {
             </section>
 
             <p className="coverage-note">
-              Based on {competitorPrices.length} competitors and {quoteRows.length} quotes
+              Based on {competitorDailyRates.length} competitors and {quoteRows.length} quotes
             </p>
 
             <section className="chart-grid chart-grid--secondary">
@@ -3187,8 +3526,8 @@ function App() {
                     <MarketSpreadChart
                       lowest={cheapestCompetitor}
                       highest={highestCompetitor}
-                      recommended={recommendedPrice}
-                      elements={elementsPrice}
+                      recommended={recommendedDailyRate}
+                      elements={elementsDailyRate}
                       cheapestRow={cheapestCompetitorRow}
                       highestRow={highestCompetitorRow}
                     />
@@ -3246,7 +3585,7 @@ function App() {
             <div className="panel__header">
               <div>
                 <span className="panel__eyebrow">Trend view</span>
-                <h3>Price trend vs recommended guidance</h3>
+                    <h3>Daily-rate trend vs recommended guidance</h3>
               </div>
               <div className="panel__legend">
                 <span className="legend legend--elements">Elements</span>
@@ -3262,6 +3601,7 @@ function App() {
                 <PriceTrendChart
                   data={trendDashboard.trend}
                   selectedPickupDate={selectedPickupDate}
+                  onActiveDateChange={setTrendActiveDateKey}
                 />
               )}
             </div>
@@ -3278,9 +3618,9 @@ function App() {
               <div>
                 <span>Positioning</span>
                 <strong>
-                  {marketGap === null
+                  {trendDecisionGap === null
                     ? "No matched Elements quote"
-                    : marketGap >= 0
+                    : trendDecisionGap >= 0
                       ? "Priced above the market"
                       : "Priced below the market"}
                 </strong>
@@ -3295,27 +3635,25 @@ function App() {
               <div>
                 <span>Cheapest signal</span>
                 <strong>
-                  {competitorPrices.length === 0
+                  {trendCheapestRate === null || trendCheapestRate === undefined
                     ? "No competitor data available for selected date"
-                    : noCompetitorsCheaperThanElements
-                    ? "No competitors cheaper than Elements"
-                    : cheapestCompetitorRow
-                    ? `${cheapestCompetitorRow.company} ${cheapestCompetitorRow.vehicle} at ${formatCurrency(cheapestCompetitorRow.price)}`
-                    : competitorStatusMessage}
+                    : `${formatCurrency(trendCheapestRate)}/day`}
                 </strong>
               </div>
               <div>
                 <span>Highest signal</span>
                 <strong>
-                  {highestCompetitorRow
-                    ? `${highestCompetitorRow.company} ${highestCompetitorRow.vehicle} at ${formatCurrency(highestCompetitorRow.price)}`
+                  {trendHighestRate !== null && trendHighestRate !== undefined
+                    ? `${formatCurrency(trendHighestRate)}/day`
                     : "No competitor data available for selected date"}
                 </strong>
               </div>
               <div>
                 <span>Recommendation</span>
                 <strong>
-                  {recommendedPrice === null ? "N/A" : formatCurrency(recommendedPrice)}
+                  {trendRecommendedRate === null || trendRecommendedRate === undefined
+                    ? "N/A"
+                    : `${formatCurrency(trendRecommendedRate)}/day`}
                 </strong>
               </div>
             </div>
@@ -3342,7 +3680,7 @@ function App() {
                       <p>{company.vehicles}</p>
                     </div>
                     <div>
-                      <strong>{formatCurrency(company.average)}</strong>
+                      <strong>{formatCurrency(company.average)}/day</strong>
                       <p>{company.count} quotes</p>
                     </div>
                   </div>
@@ -3386,12 +3724,12 @@ function App() {
                       !row.isElements &&
                       row.company === cheapestQuoteRow.company &&
                       row.vehicle === cheapestQuoteRow.vehicle &&
-                      row.price === cheapestQuoteRow.price;
+                      row.dailyRate === cheapestQuoteRow.dailyRate;
                     const percentDiff =
                       cheapestCompetitorPrice !== null &&
                       cheapestCompetitorPrice > 0 &&
-                      Number.isFinite(Number(row.price))
-                        ? ((Number(row.price) - cheapestCompetitorPrice) / cheapestCompetitorPrice) * 100
+                      Number.isFinite(Number(row.dailyRate))
+                        ? ((Number(row.dailyRate) - cheapestCompetitorPrice) / cheapestCompetitorPrice) * 100
                         : null;
                     const percentClass =
                       percentDiff === null
@@ -3412,7 +3750,7 @@ function App() {
                           !row.isElements &&
                           row.company === highestQuoteRow.company &&
                           row.vehicle === highestQuoteRow.vehicle &&
-                          row.price === highestQuoteRow.price
+                          row.dailyRate === highestQuoteRow.dailyRate
                             ? "table-row--highest"
                             : ""
                         ]
@@ -3436,7 +3774,7 @@ function App() {
                         <td>{formatCurrency(row.price)}</td>
                         <td>
                           {row.dailyRate !== null && row.dailyRate !== undefined
-                            ? formatCurrency(row.dailyRate)
+                            ? `${formatCurrency(row.dailyRate)}/day`
                             : "No data"}
                         </td>
                         <td>
@@ -3567,7 +3905,7 @@ function App() {
                   <span className="control-panel__label">Route selection</span>
                   <div className="chip-row" style={{ gap: "10px" }}>
                     {scrapeRouteOptions.map((entry) => {
-                      const selected = scrapeSelectedRoute === entry.value;
+                      const selected = scrapeSelectedRoutes.includes(entry.value);
                       return (
                         <label
                           key={entry.value}
@@ -3585,9 +3923,9 @@ function App() {
                           }}
                         >
                           <input
-                            type="radio"
+                            type="checkbox"
                             checked={selected}
-                            onChange={() => selectScrapeRoute(entry.value)}
+                            onChange={() => toggleScrapeRoute(entry.value)}
                             style={{
                               position: "absolute",
                               opacity: 0,
@@ -3619,7 +3957,7 @@ function App() {
                 <button
                   type="button"
                   className="action-button"
-                  disabled={isScrapeRunActive || !scrapeSelectedRoute}
+                  disabled={isScrapeRunActive || scrapeSelectedRoutes.length === 0}
                   onClick={() => triggerScrape()}
                 >
                   Run price update
@@ -3628,9 +3966,11 @@ function App() {
                   type="button"
                   className="action-button action-button--ghost"
                   disabled={isScrapeRunActive}
-                  onClick={() => triggerScrape(["auckland", "christchurch"])}
+                  onClick={() =>
+                    setScrapeSelectedRoutes(scrapeRouteOptions.map((option) => option.value))
+                  }
                 >
-                  Run for all locations
+                  Select all routes
                 </button>
                 <button
                   type="button"
@@ -3744,6 +4084,9 @@ function App() {
 }
 
 export default App;
+
+
+
 
 
 
