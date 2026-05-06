@@ -2090,6 +2090,7 @@ function App() {
   const [apiDatasetRowCount, setApiDatasetRowCount] = useState(0);
   const [dataReloadTrigger, setDataReloadTrigger] = useState(0);
   const [scrapeRunFeedback, setScrapeRunFeedback] = useState("");
+  const pendingPickupLocationRef = useRef(pendingPickupLocation);
   const pickupDateInputRef = useRef(null);
   const dropoffDateInputRef = useRef(null);
   const scrapePickupDateInputRef = useRef(null);
@@ -2164,16 +2165,13 @@ function App() {
   const handlePickupLocationChange = (event) => {
     const nextPickupLocation = event.target.value;
     setPendingPickupLocation(nextPickupLocation);
-    if (!pendingDropoffLocation) {
-      setAppliedPickupLocation(nextPickupLocation);
-      setAppliedDropoffLocation("");
-    }
+    setPendingDropoffLocation("");
   };
   const handleDropoffLocationChange = (event) => {
     const nextDropoffLocation = event.target.value;
     setPendingDropoffLocation(nextDropoffLocation);
-    setAppliedPickupLocation(pendingPickupLocation);
-    setAppliedDropoffLocation(nextDropoffLocation);
+    setAppliedPickupLocation(pendingPickupLocationRef.current || "");
+    setAppliedDropoffLocation(nextDropoffLocation || "");
   };
   const openNativeDatePicker = (inputRef) => {
     const input = inputRef.current;
@@ -2205,6 +2203,10 @@ function App() {
   useEffect(() => {
     setDropoffDateInputValue(formatDisplayDate(selectedDropoffDate));
   }, [selectedDropoffDate]);
+
+  useEffect(() => {
+    pendingPickupLocationRef.current = pendingPickupLocation;
+  }, [pendingPickupLocation]);
 
   useEffect(() => {
     if (appliedPickupLocation) {
