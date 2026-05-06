@@ -2087,6 +2087,7 @@ function App() {
   const [scrapeHeadless, setScrapeHeadless] = useState(true);
   const [scrapeSubmitting, setScrapeSubmitting] = useState(false);
   const [scraperStatus, setScraperStatus] = useState(initialScraperStatus);
+  const [apiDatasetRowCount, setApiDatasetRowCount] = useState(0);
   const [dataReloadTrigger, setDataReloadTrigger] = useState(0);
   const [scrapeRunFeedback, setScrapeRunFeedback] = useState("");
   const pickupDateInputRef = useRef(null);
@@ -2239,11 +2240,16 @@ function App() {
         const query = queryParams.toString() ? `?${queryParams.toString()}` : "";
         const pricesUrl = `${PRICING_API_BASE}/api/prices/latest${query}`;
         const trendsUrl = `${PRICING_API_BASE}/api/prices${query}`;
+        console.log("[DASHBOARD][API] Fetching price endpoints", { pricesUrl, trendsUrl });
 
         const [pricesResponse, trendsResponse] = await Promise.all([
           fetch(pricesUrl, { signal: controller.signal }),
           fetch(trendsUrl, { signal: controller.signal })
         ]);
+        console.log("[DASHBOARD][API] Responses", {
+          pricesStatus: pricesResponse.status,
+          trendsStatus: trendsResponse.status
+        });
 
         if (!pricesResponse.ok) {
           throw new Error(`Failed to fetch data from API (status: ${pricesResponse.status})`);
@@ -2256,7 +2262,10 @@ function App() {
           pricesResponse.json(),
           trendsResponse.json()
         ]);
-        console.log("API DATA:", Array.isArray(pricesApiRows) ? pricesApiRows.length : 0);
+        console.log("[DASHBOARD][API] Row counts", {
+          latestRows: Array.isArray(pricesApiRows) ? pricesApiRows.length : 0,
+          trendsRows: Array.isArray(trendsApiRows) ? trendsApiRows.length : 0
+        });
 
         if (cancelled) {
           return;
@@ -2355,22 +2364,68 @@ function App() {
 
   useEffect(() => {
     let cancelled = false;
+    let timerId = null;
 
     const loadScraperStatus = async () => {
+      if (cancelled) {
+        return;
+      }
+
       try {
-        const response = await fetch(`${SCRAPER_API_BASE}/api/health`);
+        const scraperHealthUrl = `${SCRAPER_API_BASE}/api/health`;
+        const datasetUrl = `${PRICING_API_BASE}/api/prices`;
+        console.log("[DASHBOARD][HEALTH] health check start", { scraperHealthUrl });
+
+        const response = await fetch(scraperHealthUrl, { cache: "no-store" });
+        console.log("[DASHBOARD][HEALTH] response status", {
+          scraperHealthStatus: response.status
+        });
+
         if (!response.ok) {
           throw new Error("Unable to reach scraper service");
         }
 
+        console.log("[DASHBOARD][HEALTH] health check success");
+        let apiRows = [];
+
+        try {
+          const datasetResponse = await fetch(datasetUrl, { cache: "no-store" });
+          if (datasetResponse.ok) {
+            const parsedRows = await datasetResponse.json();
+            apiRows = Array.isArray(parsedRows) ? parsedRows : [];
+          } else {
+            console.warn("[DASHBOARD][HEALTH] Dataset fetch failed", {
+              status: datasetResponse.status
+            });
+          }
+        } catch (datasetError) {
+          console.warn("[DASHBOARD][HEALTH] Dataset fetch error", datasetError);
+        }
+
         const payload = await response.json();
+        const apiRowCount = apiRows.length;
+        console.log("[DASHBOARD][HEALTH] Parsed payload", {
+          scraperOk: payload?.ok,
+          payloadDatasetRowCount: payload?.dataset?.rowCount ?? null,
+          apiDatasetRowCount: apiRowCount
+        });
         if (!cancelled) {
-          setScraperStatus({
+          setApiDatasetRowCount(apiRowCount);
+          setScraperStatus((current) => ({
+            ...current,
             ...payload,
+            ok: payload?.ok === true,
+            dataset: {
+              ...initialScraperStatus.dataset,
+              ...(payload?.dataset || {}),
+              rowCount: apiRowCount || payload?.dataset?.rowCount || 0
+            },
             error: ""
-          });
+          }));
         }
       } catch (error) {
+        console.error("[DASHBOARD][HEALTH] Failed", error);
+        console.log("[DASHBOARD][HEALTH] health check failure");
         if (!cancelled) {
           setScraperStatus((current) => ({
             ...current,
@@ -2384,12 +2439,25 @@ function App() {
       }
     };
 
-    loadScraperStatus();
-    const timer = window.setInterval(loadScraperStatus, 15000);
+    const scheduleNext = (delayMs) => {
+      if (cancelled) {
+        return;
+      }
+      timerId = window.setTimeout(async () => {
+        await loadScraperStatus();
+        scheduleNext(15000);
+      }, delayMs);
+    };
+
+    loadScraperStatus().finally(() => {
+      scheduleNext(5000);
+    });
 
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      if (timerId) {
+        window.clearTimeout(timerId);
+      }
     };
   }, []);
 
@@ -4008,12 +4076,14 @@ function App() {
             </div>
 
             <div className="scraper-panel__summary">
-              <div className="scraper-stat">
-                <span>Total dataset rows</span>
-                <strong>
-                  {formatCount(latestRun?.totalRows || scraperStatus.dataset.rowCount || 0)}
-                </strong>
-              </div>
+                <div className="scraper-stat">
+                  <span>Total dataset rows</span>
+                  <strong>
+                  {formatCount(
+                    latestRun?.totalRows || apiDatasetRowCount || scraperStatus.dataset.rowCount || 0
+                  )}
+                  </strong>
+                </div>
               <div className="scraper-stat">
                 <span>Latest pickup in dataset</span>
                 <strong>
