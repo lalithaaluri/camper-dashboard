@@ -185,20 +185,27 @@ test("renders camper revenue dashboard", async () => {
   expect(
     await screen.findByText(/ai-assisted pricing decision support/i)
   ).toBeInTheDocument();
-  expect(screen.getByText(/recommended price/i)).toBeInTheDocument();
+  expect(screen.getByText(/recommended daily rate/i)).toBeInTheDocument();
   expect(screen.getByRole("link", { name: /view latest data/i })).toHaveAttribute(
     "href",
     "http://localhost:4302/api/prices"
   );
   expect(screen.queryByText(/latest pickup date/i)).not.toBeInTheDocument();
   expect(global.fetch).toHaveBeenCalledWith(
-    "http://localhost:4302/api/prices/latest",
+    "http://localhost:4302/api/prices/latest?pickup_location=auckland&dropoff_location=auckland",
     expect.objectContaining({ signal: expect.any(AbortSignal) })
   );
-  expect(global.fetch).toHaveBeenCalledWith(
-    "http://localhost:4302/api/prices",
-    expect.objectContaining({ signal: expect.any(AbortSignal) })
-  );
+  expect(
+    global.fetch.mock.calls.some(([url, options]) => {
+      const requestUrl = String(url);
+      return (
+        requestUrl ===
+          "http://localhost:4302/api/prices?pickup_location=auckland&dropoff_location=auckland" &&
+        options &&
+        options.signal instanceof AbortSignal
+      );
+    })
+  ).toBe(true);
 });
 
 test("selectDefaultElementsRow prefers the non-Trek Elements row with the strongest competitor coverage", () => {
@@ -355,7 +362,7 @@ test("getMappedCompetitors returns the normalized competitor list for the select
   ]);
 });
 
-test("buildCompetitorQuoteSnapshot keeps only mapped competitor rows from the latest scrape and removes duplicates", () => {
+test("buildCompetitorQuoteSnapshot keeps latest mapped row per competitor slot and removes duplicates", () => {
   const rows = [
     {
       dateKey: "2026-05-27",
@@ -442,10 +449,71 @@ test("buildCompetitorQuoteSnapshot keeps only mapped competitor rows from the la
     dailyRate: 64
   });
   expect(snapshot.summary).toMatchObject({
-    lowest: 256,
-    highest: 256,
-    average: 256,
+    lowest: 64,
+    highest: 64,
+    average: 64,
     competitorCount: 1
+  });
+});
+
+test("buildCompetitorQuoteSnapshot keeps newest row per competitor even when scrape dates differ by company", () => {
+  const rows = [
+    {
+      dateKey: "2026-06-01",
+      dropoffDateKey: "2026-06-06",
+      location: "auckland",
+      company: "jucy",
+      vehicle: "Condo",
+      type: "competitor",
+      price: 464,
+      scrapeDate: new Date("2026-04-10")
+    },
+    {
+      dateKey: "2026-06-01",
+      dropoffDateKey: "2026-06-06",
+      location: "auckland",
+      company: "jucy",
+      vehicle: "Condo",
+      type: "competitor",
+      price: 442.4,
+      scrapeDate: new Date("2026-04-20")
+    },
+    {
+      dateKey: "2026-06-01",
+      dropoffDateKey: "2026-06-06",
+      location: "auckland",
+      company: "mighty",
+      vehicle: "Highball",
+      type: "competitor",
+      price: 606.48,
+      scrapeDate: new Date("2026-04-18")
+    },
+    {
+      dateKey: "2026-06-01",
+      dropoffDateKey: "2026-06-06",
+      location: "auckland",
+      company: "mighty",
+      vehicle: "Highball",
+      type: "competitor",
+      price: 628,
+      scrapeDate: new Date("2026-04-12")
+    }
+  ];
+
+  const snapshot = buildCompetitorQuoteSnapshot({
+    rows,
+    selectedPickup: "2026-06-01",
+    selectedDropoff: "2026-06-06",
+    selectedVehicle: "quad",
+    selectedLocation: "auckland"
+  });
+
+  expect(snapshot.rows).toHaveLength(2);
+  expect(snapshot.rows.map((row) => row.price)).toEqual([442.4, 606.48]);
+  expect(snapshot.summary).toMatchObject({
+    lowest: 88,
+    highest: 121,
+    competitorCount: 2
   });
 });
 
@@ -514,12 +582,12 @@ test("calculateRecommendedPrice returns a total even when duration is unavailabl
   const recommended = calculateRecommendedPrice(447, 14, 5);
 
   expect(recommended.baselinePrice).toBe(447);
-  expect(recommended.recommendedDailyRate).toBeCloseTo(33.525, 3);
-  expect(recommended.recommendedTotalPrice).toBeCloseTo(469.35, 2);
+  expect(recommended.recommendedDailyRate).toBeCloseTo(469.35, 2);
+  expect(recommended.recommendedTotalPrice).toBeCloseTo(6570.9, 1);
   expect(calculateRecommendedPrice(447, 0, 5)).toMatchObject({
     baselinePrice: 447,
-    recommendedDailyRate: null,
-    recommendedTotalPrice: 469.35
+    recommendedDailyRate: 469.35,
+    recommendedTotalPrice: null
   });
 });
 
@@ -824,9 +892,9 @@ test("buildDashboardFromRows still anchors recommendation to cheapest competitor
     adjustment: 10
   });
 
-  expect(dashboard.summary.lowest).toBe(220);
-  expect(dashboard.summary.elements).toBe(180);
-  expect(dashboard.summary.recommended).toBe(242);
+  expect(dashboard.summary.lowest).toBe(73);
+  expect(dashboard.summary.elements).toBe(60);
+  expect(dashboard.summary.recommended).toBe(241);
   expect(dashboard.summary.recommendationSource).toBe("competitor");
 });
 
@@ -856,7 +924,7 @@ test("buildDashboardFromRows falls back to Elements pricing when competitor data
   });
 
   expect(dashboard.summary.lowest).toBeNull();
-  expect(dashboard.summary.elements).toBe(300);
+  expect(dashboard.summary.elements).toBe(100);
   expect(dashboard.summary.recommended).toBe(330);
   expect(dashboard.summary.recommendationSource).toBe("elements");
 });
@@ -866,3 +934,4 @@ test("formatDiffVsElements returns business-friendly labels", () => {
   expect(formatDiffVsElements(-25)).toBe("-$25 (Cheaper)");
   expect(formatDiffVsElements(0)).toBe("$0 (Same price)");
 });
+

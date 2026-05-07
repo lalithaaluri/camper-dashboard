@@ -88,11 +88,10 @@ const formatDisplayDate = (value: string) => {
 const setSelectizeValue = async (
   page: Page,
   selector: string,
-  optionLabel: string,
-  allowSameAsPickup = false
+  optionLabel: string
 ) =>
   page.evaluate(
-    ({ selector, optionLabel, allowSameAsPickup }) => {
+    ({ selector, optionLabel }) => {
       const select = document.querySelector(selector) as
         | (HTMLSelectElement & { selectize?: Record<string, unknown> })
         | null;
@@ -127,14 +126,6 @@ const setSelectizeValue = async (
         return selectize.getValue() === String(directMatch.V);
       }
 
-      if (allowSameAsPickup) {
-        const sameAsPickup = groups.find((group) => group.L === "Same as Pick Up");
-        if (sameAsPickup?.V !== undefined) {
-          selectize.setValue(String(sameAsPickup.V));
-          return selectize.getValue() === String(sameAsPickup.V);
-        }
-      }
-
       const matchingGroup = groups.find(
         (group) => Array.isArray(group.O) && group.O.some((option) => option.L === optionLabel)
       );
@@ -147,8 +138,80 @@ const setSelectizeValue = async (
       selectize.setValue(String(matchingOption.V));
       return selectize.getValue() === String(matchingOption.V);
     },
-    { selector, optionLabel, allowSameAsPickup }
+    { selector, optionLabel }
   );
+
+const resolveSelectizeOptionValue = async (
+  page: Page,
+  selector: string,
+  optionLabel: string
+) =>
+  page.evaluate(
+    ({ selector, optionLabel }) => {
+      const select = document.querySelector(selector) as HTMLSelectElement | null;
+      if (!select) {
+        return null;
+      }
+
+      const raw = select.getAttribute("data-options");
+      const groups = raw
+        ? (JSON.parse(raw) as Array<{
+            L: string;
+            V?: string | number;
+            O?: Array<{ L: string; V: string | number }>;
+          }>)
+        : [];
+
+      const directMatch = groups.find(
+        (group) => group.L === optionLabel && typeof group.V !== "undefined"
+      );
+      if (directMatch?.V !== undefined) {
+        return String(directMatch.V);
+      }
+
+      const matchingGroup = groups.find(
+        (group) => Array.isArray(group.O) && group.O.some((option) => option.L === optionLabel)
+      );
+      const matchingOption = matchingGroup?.O?.find((option) => option.L === optionLabel);
+      return matchingOption?.V !== undefined ? String(matchingOption.V) : null;
+    },
+    { selector, optionLabel }
+  );
+
+const setRouteSelections = async (
+  page: Page,
+  pickupDepot: DepotCode,
+  dropoffDepot: DepotCode
+) => {
+  const pickupLabel = DEPOTS[pickupDepot].label;
+  const dropoffLabel = DEPOTS[dropoffDepot].label;
+  const pickupSelector = `${SEARCH_FORM_SELECTOR} select[name="Parameters.LocationFrom"]`;
+  const dropoffSelector = `${SEARCH_FORM_SELECTOR} select[name="Parameters.LocationTo"]`;
+
+  const expectedPickupValue = await resolveSelectizeOptionValue(page, pickupSelector, pickupLabel);
+  const expectedDropoffValue = await resolveSelectizeOptionValue(page, dropoffSelector, dropoffLabel);
+
+  if (!expectedPickupValue || !expectedDropoffValue || expectedDropoffValue === "0") {
+    return { ok: false, expectedPickupValue, expectedDropoffValue };
+  }
+
+  const pickupSet = await setSelectizeValue(page, pickupSelector, pickupLabel);
+  const dropoffSet = await setSelectizeValue(page, dropoffSelector, dropoffLabel);
+  if (!pickupSet || !dropoffSet) {
+    return { ok: false, expectedPickupValue, expectedDropoffValue };
+  }
+
+  const formState = await readSearchFormState(page);
+  const pickupValueMatches = formState.locationFrom.value === expectedPickupValue;
+  const dropoffValueMatches = formState.locationTo.value === expectedDropoffValue;
+  const dropoffIsPlaceholder = formState.locationTo.value === "0";
+  return {
+    ok: pickupValueMatches && dropoffValueMatches && !dropoffIsPlaceholder,
+    expectedPickupValue,
+    expectedDropoffValue,
+    state: formState
+  };
+};
 
 const fillBookingWidget = async (
   page: Page,
@@ -157,21 +220,10 @@ const fillBookingWidget = async (
   pickupDate: string,
   dropoffDate: string
 ) => {
-  const pickupLabel = DEPOTS[pickupDepot].label;
-  const dropoffLabel = DEPOTS[dropoffDepot].label;
-
-  const pickupSet = await setSelectizeValue(
-    page,
-    `${SEARCH_FORM_SELECTOR} select[name="Parameters.LocationFrom"]`,
-    pickupLabel
-  );
-  const allowSameAsPickupFallback = pickupDepot === dropoffDepot;
-  const dropoffSet = await setSelectizeValue(
-    page,
-    `${SEARCH_FORM_SELECTOR} select[name="Parameters.LocationTo"]`,
-    dropoffLabel,
-    allowSameAsPickupFallback
-  );
+  const routeSelection = await setRouteSelections(page, pickupDepot, dropoffDepot);
+  if (!routeSelection.ok) {
+    return false;
+  }
 
   const datesSet = await page.evaluate(
     ({ pickupDate, dropoffDate, pickupDisplayDate, dropoffDisplayDate, formSelector }) => {
@@ -214,7 +266,7 @@ const fillBookingWidget = async (
     }
   );
 
-  return pickupSet && dropoffSet && datesSet;
+  return datesSet;
 };
 
 const readSearchFormState = async (page: Page) =>
@@ -289,9 +341,20 @@ const ensureWidgetStateBeforeSubmit = async (
   pickupDate: string,
   dropoffDate: string
 ) => {
-  const isCrossLocation = pickupDepot !== dropoffDepot;
   const expectedPickupLabel = DEPOTS[pickupDepot].label.toLowerCase();
   const expectedDropoffLabel = DEPOTS[dropoffDepot].label.toLowerCase();
+  const pickupSelector = `${SEARCH_FORM_SELECTOR} select[name="Parameters.LocationFrom"]`;
+  const dropoffSelector = `${SEARCH_FORM_SELECTOR} select[name="Parameters.LocationTo"]`;
+  const expectedPickupValue = await resolveSelectizeOptionValue(
+    page,
+    pickupSelector,
+    DEPOTS[pickupDepot].label
+  );
+  const expectedDropoffValue = await resolveSelectizeOptionValue(
+    page,
+    dropoffSelector,
+    DEPOTS[dropoffDepot].label
+  );
 
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     const widgetReady = await fillBookingWidget(
@@ -316,12 +379,12 @@ const ensureWidgetStateBeforeSubmit = async (
     const toLabelMatches =
       !formState.locationTo.label ||
       formState.locationTo.label.toLowerCase().includes(expectedDropoffLabel);
-    const routeLooksValid = isCrossLocation
-      ? Boolean(formState.locationFrom.value) &&
-        Boolean(formState.locationTo.value) &&
-        formState.locationFrom.value !== formState.locationTo.value &&
-        formState.locationTo.value !== "0"
-      : true;
+    const routeLooksValid =
+      Boolean(formState.locationFrom.value) &&
+      Boolean(formState.locationTo.value) &&
+      formState.locationTo.value !== "0" &&
+      (!expectedPickupValue || formState.locationFrom.value === expectedPickupValue) &&
+      (!expectedDropoffValue || formState.locationTo.value === expectedDropoffValue);
 
     if (
       pickupMatches &&
@@ -330,12 +393,22 @@ const ensureWidgetStateBeforeSubmit = async (
       toLabelMatches &&
       routeLooksValid
     ) {
-      return { ready: true, state: formState };
+      return {
+        ready: true,
+        state: formState,
+        expectedPickupValue,
+        expectedDropoffValue
+      };
     }
   }
 
   const finalState = await readSearchFormState(page);
-  return { ready: false, state: finalState };
+  return {
+    ready: false,
+    state: finalState,
+    expectedPickupValue,
+    expectedDropoffValue
+  };
 };
 
 const submitSearch = async (page: Page) => {
@@ -563,6 +636,12 @@ const scrapeQuoteSet = async (
     );
     console.log("[SCRAPER][SUBMIT-CHECK]", {
       requestedRoute: `${pickupDepot}->${dropoffDepot}`,
+      expectedPickupDepot: pickupDepot,
+      expectedDropoffDepot: dropoffDepot,
+      expectedPickupLabel: DEPOTS[pickupDepot].label,
+      expectedDropoffLabel: DEPOTS[dropoffDepot].label,
+      expectedPickupValue: widgetSetup.expectedPickupValue ?? null,
+      expectedDropoffValue: widgetSetup.expectedDropoffValue ?? null,
       pickupDate,
       dropoffDate,
       attempt,

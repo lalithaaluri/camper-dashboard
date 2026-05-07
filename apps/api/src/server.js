@@ -27,6 +27,21 @@ const NORMALIZED_SCRAPE_DATE_SQL = `
   END
 `;
 
+const DURATION_DAYS_SQL = `(julianday(dropoff_date) - julianday(pickup_date))`;
+const DAILY_RATE_SQL = `
+  CASE
+    WHEN ${DURATION_DAYS_SQL} > 0 THEN ROUND(price / ${DURATION_DAYS_SQL})
+    ELSE NULL
+  END
+`;
+const DAILY_RATE_SQL_L = `
+  CASE
+    WHEN (julianday(l.dropoff_date) - julianday(l.pickup_date)) > 0
+      THEN ROUND(l.price / (julianday(l.dropoff_date) - julianday(l.pickup_date)))
+    ELSE NULL
+  END
+`;
+
 function normalizeVehicle(vehicle) {
   if (!vehicle) return vehicle;
 
@@ -138,6 +153,7 @@ app.get("/api/prices", (req, res) => {
             company,
             vehicle,
             price,
+            ${DAILY_RATE_SQL} AS daily_rate,
             scrape_date,
             type
           FROM pricing_data
@@ -222,6 +238,7 @@ app.get("/api/prices/latest", (req, res) => {
             l.company,
             l.vehicle,
             l.price,
+            ${DAILY_RATE_SQL_L} AS daily_rate,
             l.scrape_date,
             l.type
           FROM latest_rows_with_route l
@@ -261,6 +278,7 @@ app.get("/api/trends", async (req, res) => {
           company,
           vehicle,
           price,
+          ${DAILY_RATE_SQL} AS daily_rate,
           scrape_date,
           type
         FROM pricing_data
