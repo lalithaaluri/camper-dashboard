@@ -153,6 +153,7 @@ app.get("/api/prices", (req, res) => {
             company,
             vehicle,
             price,
+            website_daily_rate,
             ${DAILY_RATE_SQL} AS daily_rate,
             scrape_date,
             type
@@ -238,6 +239,7 @@ app.get("/api/prices/latest", (req, res) => {
             l.company,
             l.vehicle,
             l.price,
+            l.website_daily_rate,
             ${DAILY_RATE_SQL_L} AS daily_rate,
             l.scrape_date,
             l.type
@@ -278,6 +280,7 @@ app.get("/api/trends", async (req, res) => {
           company,
           vehicle,
           price,
+          website_daily_rate,
           ${DAILY_RATE_SQL} AS daily_rate,
           scrape_date,
           type

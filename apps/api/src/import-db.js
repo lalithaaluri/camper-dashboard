@@ -53,9 +53,10 @@ const importCsvToDb = async (customCsvPath) => {
       company,
       vehicle,
       price,
+      website_daily_rate,
       scrape_date,
       type
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
   `);
   const insertBatch = db.transaction((rows) => {
     for (const row of rows) {
@@ -97,6 +98,9 @@ const importCsvToDb = async (customCsvPath) => {
           normalizeString(row.company),
           normalizeString(row.vehicle),
           price,
+          Number.isFinite(Number(row.website_daily_rate))
+            ? Number(row.website_daily_rate)
+            : null,
           normalizeString(row.scrape_date),
           normalizeString(row.type)
         ]);

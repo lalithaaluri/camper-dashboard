@@ -50,9 +50,10 @@ export function generateDateCombinations(pickupDate: string, maxTripDays: number
 }
 
 const SEARCH_TIMEOUT_MS = 20_000;
-const RESULTS_TIMEOUT_MS = 30_000;
+const RESULTS_TIMEOUT_MS = 60_000;
 const SEARCH_FORM_SELECTOR = "form[action='/widget/book/search']";
-const RESULTS_SELECTOR = ".price-label, [class*='price-label']";
+const RESULTS_SELECTOR =
+  ".price-label, [class*='price-label'], .price, [class*='price'], [data-price], [data-testid*='price']";
 const PHASE_ONE_ALLOWED_CROSS_LOCATION_ROUTES = new Set([
   "auckland|christchurch",
   "christchurch|auckland"
@@ -61,6 +62,30 @@ const PHASE_ONE_ALLOWED_CROSS_LOCATION_ROUTES = new Set([
 const cleanPrice = (value: string) => {
   const numeric = Number(value.replace(/[^\d.]/g, ""));
   return Number.isFinite(numeric) ? numeric : null;
+};
+
+const getTripDays = (pickupDate: string, dropoffDate: string) => {
+  const pickup = new Date(`${pickupDate}T00:00:00Z`);
+  const dropoff = new Date(`${dropoffDate}T00:00:00Z`);
+  const diffMs = dropoff.getTime() - pickup.getTime();
+  const days = Math.round(diffMs / (24 * 60 * 60 * 1000));
+  return Number.isFinite(days) && days > 0 ? days : 1;
+};
+
+const extractWebsiteDailyRate = (value: string) => {
+  const match = value.match(/(\$?\s*\d[\d,]*(?:\.\d{1,2})?)\s*(?:\/\s*)?day\b/i);
+  if (!match?.[1]) {
+    return null;
+  }
+  return cleanPrice(match[1]);
+};
+
+const extractWebsiteTotalPrice = (value: string) => {
+  const match = value.match(/(\$?\s*\d[\d,]*(?:\.\d{1,2})?)\s*total\b/i);
+  if (!match?.[1]) {
+    return null;
+  }
+  return cleanPrice(match[1]);
 };
 
 const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -446,8 +471,24 @@ const dismissOverlays = async (page: Page) => {
 const waitForResults = async (page: Page) => {
   await page.waitForLoadState("domcontentloaded", { timeout: SEARCH_TIMEOUT_MS });
   await page.waitForLoadState("networkidle", { timeout: SEARCH_TIMEOUT_MS }).catch(() => undefined);
-  // Python flow uses sleep and then scrapes; do the same by waiting for attachment, not visibility.
-  await page.waitForSelector(RESULTS_SELECTOR, { timeout: RESULTS_TIMEOUT_MS, state: "attached" });
+  await page.waitForFunction(
+    ({ selector }) => {
+      const root = document.body;
+      if (!root) {
+        return false;
+      }
+
+      const hasResultNode = Boolean(document.querySelector(selector));
+      const text = (root.innerText || "").toLowerCase();
+      const hasCurrency = /\$\s*\d/.test(text);
+      const hasNoResults =
+        /no\s+(results|vehicles|availability)/i.test(text) ||
+        /sold\s*out/i.test(text);
+      return hasResultNode || hasCurrency || hasNoResults;
+    },
+    { selector: RESULTS_SELECTOR },
+    { timeout: RESULTS_TIMEOUT_MS }
+  );
   await page.waitForTimeout(8_000);
 };
 
@@ -459,11 +500,21 @@ const collectCurrentPageRows = async (
   dropoffDepot: DepotCode,
   scrapeDate: string
 ) => {
-  const blocks = page.locator(RESULTS_SELECTOR);
-  const count = await blocks.count();
+  let blocks = page.locator(RESULTS_SELECTOR);
+  let count = await blocks.count();
+  let usingFallbackMoneyScan = false;
+  if (count === 0) {
+    // Fallback for DOM changes where legacy "price-label" classes disappear.
+    blocks = page.locator("xpath=//*[contains(normalize-space(text()), '$')]");
+    count = Math.min(await blocks.count(), 400);
+    usingFallbackMoneyScan = true;
+  }
   const rows: PriceRow[] = [];
 
-  console.log("[SCRAPER] Vehicles/price blocks found:", count);
+  console.log("[SCRAPER] Vehicles/price blocks found:", {
+    count,
+    usingFallbackMoneyScan
+  });
 
   for (let index = 0; index < count; index += 1) {
     const payload = await blocks.nth(index).evaluate((node) => {
@@ -479,6 +530,39 @@ const collectCurrentPageRows = async (
         }
         current = current.parentElement;
       }
+
+      const cardContainer =
+        cardRoot.closest(
+          "article, li, .vehicle, .vehicle-card, .result, .result-item, .product, .product-item"
+        ) || cardRoot;
+
+      // Find a compact badge scope that contains the "/day" + "total" values for this card.
+      let priceBadgeScope: Element = node;
+      let badgeCursor: Element | null = node;
+      for (let hops = 0; hops < 8 && badgeCursor; hops += 1) {
+        const text = (badgeCursor.textContent || "").replace(/\s+/g, " ").trim();
+        const hasDaily = /(?:\/\s*)?day\b/i.test(text);
+        const hasTotal = /\btotal\b/i.test(text);
+        if (hasDaily || hasTotal) {
+          priceBadgeScope = badgeCursor;
+        }
+        badgeCursor = badgeCursor.parentElement;
+      }
+
+      const cardScopedText = (cardContainer.textContent || "").replace(/\s+/g, " ").trim();
+      const badgeScopedText = (priceBadgeScope.textContent || "").replace(/\s+/g, " ").trim();
+      const compactTexts = Array.from(cardContainer.querySelectorAll("*"))
+        .map((el) => (el.textContent || "").replace(/\s+/g, " ").trim())
+        .filter((text) => text.length > 0 && text.length < 220);
+      const explicitTotalSource =
+        compactTexts.find((text) => /\$?\s*\d[\d,]*(?:\.\d{1,2})?\s*total\b/i.test(text)) ||
+        (/\$?\s*\d[\d,]*(?:\.\d{1,2})?\s*total\b/i.test(badgeScopedText) ? badgeScopedText : null);
+      const dailyBadgeText = Array.from(cardContainer.querySelectorAll("*"))
+        .map((el) => (el.textContent || "").replace(/\s+/g, " ").trim())
+        .find((text) => /(?:\/\s*)?day\b/i.test(text) && /\$?\s*\d/.test(text));
+      const totalBadgeText = Array.from(cardContainer.querySelectorAll("*"))
+        .map((el) => (el.textContent || "").replace(/\s+/g, " ").trim())
+        .find((text) => /total/i.test(text) && /\$?\s*\d/.test(text));
 
       const candidates = Array.from(
         cardRoot.querySelectorAll("p, span, strong, b, div")
@@ -511,6 +595,8 @@ const collectCurrentPageRows = async (
             lowered.includes("fee") ||
             lowered.includes("surcharge") ||
             lowered.includes("deposit");
+          const isDailyLike = /(?:\/\s*)?day\b/i.test(lowered);
+          const isTotalLike = /\btotal\b/i.test(lowered);
           const isCurrentLike =
             className.includes("price-label") ||
             className.includes("current") ||
@@ -519,6 +605,8 @@ const collectCurrentPageRows = async (
 
           let baseScore = 0;
           if (isCurrentLike) baseScore += 3;
+          if (isTotalLike) baseScore += 4;
+          if (isDailyLike) baseScore -= 5;
           if (isFeeLike) baseScore -= 2;
           if (isStruck) baseScore -= 6;
           if (text.includes("$")) baseScore += 1;
@@ -535,26 +623,65 @@ const collectCurrentPageRows = async (
         .sort((left, right) => right.score - left.score);
 
       const fallbackText = (node.textContent || "").replace(/\s+/g, " ").trim();
-      const selected = candidates[0]?.matched || fallbackText;
+      const badgeTotalMatch =
+        badgeScopedText.match(/\$?\s*\d[\d,]*(?:\.\d{1,2})?\s*total\b/i)?.[0] || null;
+      const selected = badgeTotalMatch || totalBadgeText || candidates[0]?.matched || fallbackText;
 
       return {
         selectedPriceText: selected,
-        fullText
+        fullText: cardScopedText || fullText,
+        websiteDailyText: dailyBadgeText || badgeScopedText || cardScopedText || fullText,
+        websiteTotalText: explicitTotalSource || badgeScopedText || totalBadgeText || cardScopedText || fullText
       };
     });
 
-    const price = cleanPrice(payload.selectedPriceText);
+    const parsedTotalFromBadge = extractWebsiteTotalPrice(payload.websiteTotalText || "");
+    const price = parsedTotalFromBadge ?? cleanPrice(payload.selectedPriceText);
+    const websiteDailyRate = extractWebsiteDailyRate(payload.websiteDailyText || "");
     const match = identifyVehicle(payload.fullText);
 
     if (!price || !match) {
       continue;
     }
 
+    // Safety-first: only keep rows with explicit total extraction.
+    // This prevents cross-card contamination from random numeric tokens.
+    if (!parsedTotalFromBadge) {
+      console.warn("[SCRAPER] Skipping row without explicit total:", {
+        company: match.company,
+        vehicle: match.vehicle,
+        pickupDate,
+        dropoffDate
+      });
+      continue;
+    }
+
+    if (websiteDailyRate) {
+      const tripDays = getTripDays(pickupDate, dropoffDate);
+      const ratio = price / websiteDailyRate;
+      // Guardrail: reject clearly cross-card or malformed totals.
+      // Real-world ratios may vary due fees/promos, so keep the bounds wide.
+      if (ratio < 0.5 || ratio > tripDays + 4) {
+        console.warn("[SCRAPER] Skipping suspicious price pair:", {
+          company: match.company,
+          vehicle: match.vehicle,
+          pickupDate,
+          dropoffDate,
+          tripDays,
+          price,
+          websiteDailyRate,
+          ratio
+        });
+        continue;
+      }
+    }
+
     console.log("[SCRAPER] Extracted:", {
       company: match.company,
       vehicle: match.vehicle,
       type: match.type,
-      price
+      price,
+      websiteDailyRate: websiteDailyRate ?? null
     });
 
     rows.push({
@@ -566,6 +693,7 @@ const collectCurrentPageRows = async (
       company: match.company,
       vehicle: match.vehicle,
       price,
+      website_daily_rate: websiteDailyRate,
       scrape_date: scrapeDate,
       type: match.type
     });
@@ -689,7 +817,21 @@ const scrapeQuoteSet = async (
   }
 
   console.log("[SCRAPER] Search submitted, waiting for results");
-  await waitForResults(page);
+  try {
+    await waitForResults(page);
+  } catch (error) {
+    const failTag = `${pickupDepot}-${dropoffDepot}-${pickupDate}-${dropoffDate}`;
+    await writeFile(
+      path.join(paths.artifactsDir, `failed-results-${failTag}.html`),
+      await page.content(),
+      "utf8"
+    ).catch(() => undefined);
+    await page.screenshot({
+      path: path.join(paths.artifactsDir, `failed-results-${failTag}.png`),
+      fullPage: true
+    }).catch(() => undefined);
+    throw error;
+  }
   console.log("[SCRAPER] Results page loaded:", page.url());
 
   const minimumByKey = new Map<string, PriceRow>();

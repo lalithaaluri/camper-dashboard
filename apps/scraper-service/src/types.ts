@@ -24,6 +24,7 @@ export interface PriceRow {
   company: string;
   vehicle: string;
   price: number;
+  website_daily_rate?: number | null;
   scrape_date: string;
   type: "elements" | "competitor";
 }

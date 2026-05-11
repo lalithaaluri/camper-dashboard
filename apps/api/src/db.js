@@ -18,6 +18,7 @@ const initializeSchema = (database) => {
       company TEXT,
       vehicle TEXT,
       price REAL,
+      website_daily_rate REAL,
       scrape_date TEXT,
       type TEXT
     );
@@ -32,6 +33,9 @@ const initializeSchema = (database) => {
   if (!columnNames.has("dropoff_location")) {
     database.exec(`ALTER TABLE pricing_data ADD COLUMN dropoff_location TEXT`);
   }
+  if (!columnNames.has("website_daily_rate")) {
+    database.exec(`ALTER TABLE pricing_data ADD COLUMN website_daily_rate REAL`);
+  }
 };
 
 const getDb = () => {
@@ -42,6 +46,8 @@ const getDb = () => {
   fs.mkdirSync(dataDir, { recursive: true });
   console.log("API DB PATH:", dbPath);
   db = new Database(dbPath);
+  db.pragma("journal_mode = WAL");
+  db.pragma("busy_timeout = 10000");
   initializeSchema(db);
   return db;
 };

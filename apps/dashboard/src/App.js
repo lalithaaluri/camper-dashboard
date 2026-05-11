@@ -543,6 +543,11 @@ const calculateDailyRate = (price, durationDays) => {
 };
 
 const resolveTrendDailyRate = (row) => {
+  const websiteDailyRate = Number(row?.website_daily_rate ?? row?.websiteDailyRate);
+  if (Number.isFinite(websiteDailyRate) && websiteDailyRate > 0) {
+    return Math.round(websiteDailyRate);
+  }
+
   const apiDailyRate = Number(row?.daily_rate ?? row?.apiDailyRate);
   if (Number.isFinite(apiDailyRate) && apiDailyRate > 0) {
     return Math.round(apiDailyRate);
@@ -677,7 +682,7 @@ export const buildCompetitorQuoteSnapshot = ({
   const quoteRows = dedupeQuoteRows(validCompetitorRows)
     .map((row) => {
       const durationDays = getRowDurationDays(row);
-      const dailyRate = calculateDailyRate(row.price, durationDays);
+      const dailyRate = resolveTrendDailyRate({ ...row, durationDays });
 
       return {
         ...row,
@@ -744,7 +749,7 @@ export const buildQuoteTableRows = ({
       isElements: true,
       normalizedVehicle: normalizeVehicleName(elementsRow.vehicle),
       durationDays,
-      dailyRate: calculateDailyRate(elementsRow.price, durationDays)
+      dailyRate: resolveTrendDailyRate({ ...elementsRow, durationDays })
     });
   }
 
@@ -801,7 +806,7 @@ const collectBucketMetrics = (bucket, options = {}) => {
       return {
         ...row,
         durationDays,
-        dailyRate: calculateDailyRate(row.price, durationDays),
+        dailyRate: resolveTrendDailyRate({ ...row, durationDays }),
         trendDailyRate
       };
     });
@@ -1044,13 +1049,9 @@ export const buildExactTripMetrics = ({
       ? (new Date(selectedDropoff) - new Date(selectedPickup)) / (1000 * 60 * 60 * 24)
       : null;
   const totalPrice = selectedRow ? selectedRow.price : null;
-  const dailyRate =
-    totalPrice !== null &&
-    duration !== null &&
-    Number.isFinite(duration) &&
-    duration > 0
-      ? Math.round(totalPrice / duration)
-      : null;
+  const dailyRate = selectedRow
+    ? resolveTrendDailyRate({ ...selectedRow, durationDays: duration })
+    : null;
 
   return {
     selectedRow,
@@ -1249,7 +1250,7 @@ export const buildDashboardFromRows = ({
   latestRows = latestRows.map((row) => ({
     ...row,
     durationDays: getRowDurationDays(row),
-    dailyRate: calculateDailyRate(row.price, getRowDurationDays(row))
+    dailyRate: resolveTrendDailyRate({ ...row, durationDays: getRowDurationDays(row) })
   }));
 
   latestRows.sort((left, right) => {
@@ -1261,13 +1262,13 @@ export const buildDashboardFromRows = ({
   });
 
   const competitorPrices = latestRows
-    .map((row) => calculateDailyRate(row.price, getRowDurationDays(row)))
+    .map((row) => resolveTrendDailyRate({ ...row, durationDays: getRowDurationDays(row) }))
     .filter((rate) => rate !== null);
   const hasCompetitors = competitorPrices.length > 0;
   const latestAverage = hasCompetitors ? averageFrom(competitorPrices) : null;
   let latestElements = snapshotMetrics?.elementsRows
     ?.filter((row) => (selectedVehicle ? isSameVehicle(row.vehicle, selectedVehicle) : true))
-    .map((row) => calculateDailyRate(row.price, getRowDurationDays(row)));
+    .map((row) => resolveTrendDailyRate({ ...row, durationDays: getRowDurationDays(row) }));
   latestElements = latestElements?.length
     ? averageFrom(latestElements.filter((rate) => rate !== null))
     : null;
@@ -2308,6 +2309,9 @@ function App() {
                   String(row.dropoff_location).trim() !== "",
                 type: normalize(row.type),
                 price,
+                websiteDailyRate: Number.isFinite(Number(row.website_daily_rate))
+                  ? Number(row.website_daily_rate)
+                  : null,
                 tripDays: calculateTripDays(dateObject, dropoffObject),
                 scrapeDate: parseDate(row.scrape_date)
               };
@@ -2751,7 +2755,7 @@ function App() {
     .filter(isValidCompetitorPriceRow)
     .map((row) => {
       const durationDays = getRowDurationDays(row);
-      const dailyRate = calculateDailyRate(row.price, durationDays);
+      const dailyRate = resolveTrendDailyRate({ ...row, durationDays });
 
       return {
         ...row,

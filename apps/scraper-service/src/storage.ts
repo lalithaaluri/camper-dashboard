@@ -107,6 +107,8 @@ const parseCsv = (raw: string): PriceRow[] => {
 
 const openPricingDb = () => {
   const db = new DatabaseSync(paths.apiPricingDbFile);
+  db.exec("PRAGMA journal_mode=WAL;");
+  db.exec("PRAGMA busy_timeout=10000;");
   db.exec(`
     CREATE TABLE IF NOT EXISTS pricing_data (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -116,6 +118,7 @@ const openPricingDb = () => {
       company TEXT,
       vehicle TEXT,
       price REAL,
+      website_daily_rate REAL,
       scrape_date TEXT,
       type TEXT
     );
@@ -131,6 +134,9 @@ const openPricingDb = () => {
   }
   if (!existingColumnNames.has("dropoff_location")) {
     db.exec(`ALTER TABLE pricing_data ADD COLUMN dropoff_location TEXT`);
+  }
+  if (!existingColumnNames.has("website_daily_rate")) {
+    db.exec(`ALTER TABLE pricing_data ADD COLUMN website_daily_rate REAL`);
   }
 
   const indexes = db
@@ -180,9 +186,10 @@ export const insertPricingRows = async (rows: PriceRow[]) => {
       company,
       vehicle,
       price,
+      website_daily_rate,
       scrape_date,
       type
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
   `);
   let inserted = 0;
 
@@ -198,6 +205,7 @@ export const insertPricingRows = async (rows: PriceRow[]) => {
         row.company,
         row.vehicle,
         row.price,
+        row.website_daily_rate ?? null,
         row.scrape_date,
         row.type
       );
@@ -286,6 +294,7 @@ const loadDatasetFromDb = async (): Promise<PriceRow[]> => {
             company,
             vehicle,
             price,
+            website_daily_rate,
             scrape_date,
             type
           FROM pricing_data
@@ -300,6 +309,7 @@ const loadDatasetFromDb = async (): Promise<PriceRow[]> => {
       company: string;
       vehicle: string;
       price: number;
+      website_daily_rate?: number | null;
       scrape_date: string;
       type: string;
     }>;
@@ -321,6 +331,10 @@ const loadDatasetFromDb = async (): Promise<PriceRow[]> => {
         company: String(row.company ?? "").trim().toLowerCase(),
         vehicle: String(row.vehicle ?? "").trim().toLowerCase(),
         price: Number(row.price),
+        website_daily_rate:
+          row.website_daily_rate === null || row.website_daily_rate === undefined
+            ? null
+            : Number(row.website_daily_rate),
         scrape_date: normalizeDate(String(row.scrape_date ?? "")),
         type: normalizedType
       };
