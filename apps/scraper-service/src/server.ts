@@ -21,6 +21,7 @@ import type { DepotCode, RoutePair, RunSummary, ScrapeRequest } from "./types.js
 
 const app = express();
 const port = Number(process.env.PORT || 4301);
+const host = process.env.HOST || "0.0.0.0";
 let activeRunId: string | null = null;
 const AUTO_RUN = false;
 const depotSchema = z.enum(["auckland", "christchurch"]);
@@ -290,8 +291,8 @@ app.post("/api/fix-trek-june-auckland", async (req, res) => {
 ensureStorage()
   .then(async () => {
     await recoverStaleRunLock();
-    app.listen(port, () => {
-      console.log(`scraper-service listening on http://localhost:${port}`);
+    app.listen(port, host, () => {
+      console.log(`scraper-service listening on http://${host}:${port}`);
       void AUTO_RUN;
     });
   })

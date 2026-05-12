@@ -9,10 +9,14 @@ import { Bar, LinePath } from "@visx/shape";
 import { Text } from "@visx/text";
 import "./App.css";
 
+const browserHost =
+  typeof window !== "undefined" && window.location?.hostname
+    ? window.location.hostname
+    : "localhost";
 const SCRAPER_API_BASE =
-  process.env.REACT_APP_SCRAPER_API_URL || "http://localhost:4301";
+  process.env.REACT_APP_SCRAPER_API_URL || `http://${browserHost}:4301`;
 const PRICING_API_BASE =
-  process.env.REACT_APP_PRICING_API_URL || "http://localhost:4302";
+  process.env.REACT_APP_PRICING_API_URL || `http://${browserHost}:4302`;
 
 const vehicleConfigs = {
   "trek budget": {

@@ -14,6 +14,23 @@ pnpm dev:scraper
 pnpm dev:dashboard
 ```
 
+## Ubuntu VM access from host machine
+
+When opening the dashboard from your host browser via VM IP (for example
+`http://192.168.x.x:3000`), start services with host binding enabled:
+
+```bash
+HOST=0.0.0.0 pnpm --filter api dev
+HOST=0.0.0.0 pnpm dev:scraper
+HOST=0.0.0.0 pnpm dev:dashboard
+```
+
+Then open:
+
+- `http://<vm-ip>:3000` (dashboard)
+- `http://<vm-ip>:4302/api/health` (pricing API)
+- `http://<vm-ip>:4301/api/health` (scraper service)
+
 ## Scraper service
 
 The scraper service runs on `http://localhost:4301` by default and exposes:

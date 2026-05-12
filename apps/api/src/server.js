@@ -12,6 +12,7 @@ process.on("unhandledRejection", (err) => {
 
 const app = express();
 const port = Number(process.env.PORT || 4302);
+const host = process.env.HOST || "0.0.0.0";
 
 const NORMALIZED_SCRAPE_DATE_SQL = `
   CASE
@@ -92,13 +93,7 @@ function buildRouteFilters(query) {
   return { conditions, params };
 }
 
-app.use(
-  cors({
-    origin: "http://localhost:3000",
-    methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type"]
-  })
-);
+app.use(cors());
 app.options(/.*/, cors());
 app.use(express.json());
 
@@ -297,8 +292,8 @@ app.get("/api/trends", async (req, res) => {
   }
 });
 
-app.listen(port, () => {
+app.listen(port, host, () => {
   getDb();
   console.log("SERVER STARTED SUCCESSFULLY");
-  console.log(`API listening on http://localhost:${port}`);
+  console.log(`API listening on http://${host}:${port}`);
 });
