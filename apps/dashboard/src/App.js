@@ -3492,7 +3492,7 @@ function App() {
                 ? "No data"
                 : `${formatCurrency(elementsRow.dailyRate)}/day`
             }
-            detail="Total price divided by trip duration"
+            detail="Daily rate from website, or total price divided by trip duration."
             tone="canyon"
           />
           <StatCard
