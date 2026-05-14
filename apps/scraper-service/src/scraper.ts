@@ -498,7 +498,9 @@ const collectCurrentPageRows = async (
   dropoffDate: string,
   pickupDepot: DepotCode,
   dropoffDepot: DepotCode,
-  scrapeDate: string
+  scrapeDate: string,
+  seenLogKeys?: Set<string>,
+  logBlockCount = true
 ) => {
   let blocks = page.locator(RESULTS_SELECTOR);
   let count = await blocks.count();
@@ -509,12 +511,14 @@ const collectCurrentPageRows = async (
     count = Math.min(await blocks.count(), 400);
     usingFallbackMoneyScan = true;
   }
-  const rows: PriceRow[] = [];
+  const rowsByKey = new Map<string, PriceRow>();
 
-  console.log("[SCRAPER] Vehicles/price blocks found:", {
-    count,
-    usingFallbackMoneyScan
-  });
+  if (logBlockCount) {
+    console.log("[SCRAPER] Vehicles/price blocks found:", {
+      count,
+      usingFallbackMoneyScan
+    });
+  }
 
   for (let index = 0; index < count; index += 1) {
     const payload = await blocks.nth(index).evaluate((node) => {
@@ -676,15 +680,7 @@ const collectCurrentPageRows = async (
       }
     }
 
-    console.log("[SCRAPER] Extracted:", {
-      company: match.company,
-      vehicle: match.vehicle,
-      type: match.type,
-      price,
-      websiteDailyRate: websiteDailyRate ?? null
-    });
-
-    rows.push({
+    const row: PriceRow = {
       pickup_date: pickupDate,
       dropoff_date: dropoffDate,
       pickup_location: pickupDepot,
@@ -696,10 +692,128 @@ const collectCurrentPageRows = async (
       website_daily_rate: websiteDailyRate,
       scrape_date: scrapeDate,
       type: match.type
-    });
+    };
+    const key = buildRowKey(row);
+    const existing = rowsByKey.get(key);
+    if (!existing || row.price < existing.price) {
+      rowsByKey.set(key, row);
+      const logKey = `${key}|${row.price}|${row.website_daily_rate ?? "na"}`;
+      const shouldLog = !seenLogKeys || !seenLogKeys.has(logKey);
+      if (shouldLog) {
+        console.log("[SCRAPER] Extracted:", {
+          company: match.company,
+          vehicle: match.vehicle,
+          type: match.type,
+          price,
+          websiteDailyRate: websiteDailyRate ?? null
+        });
+        seenLogKeys?.add(logKey);
+      }
+    }
   }
 
-  return rows;
+  return Array.from(rowsByKey.values());
+};
+
+const buildRowKey = (row: PriceRow) =>
+  [
+    row.pickup_date,
+    row.dropoff_date,
+    row.pickup_location ?? row.location,
+    row.dropoff_location ?? row.location,
+    row.location,
+    row.company,
+    row.vehicle
+  ].join("|");
+
+const collectRowsAcrossLazyContent = async (
+  page: Page,
+  pickupDate: string,
+  dropoffDate: string,
+  pickupDepot: DepotCode,
+  dropoffDepot: DepotCode,
+  scrapeDate: string
+) => {
+  const rowsByKey = new Map<string, PriceRow>();
+  const seenLogKeys = new Set<string>();
+  const maxScrollPasses = 18;
+  let previousHeight = 0;
+  let stablePasses = 0;
+  let noNewRowsPasses = 0;
+
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await pause(350);
+
+  for (let pass = 0; pass < maxScrollPasses; pass += 1) {
+    const beforeCount = rowsByKey.size;
+    const rows = await collectCurrentPageRows(
+      page,
+      pickupDate,
+      dropoffDate,
+      pickupDepot,
+      dropoffDepot,
+      scrapeDate,
+      seenLogKeys,
+      pass === 0
+    );
+
+    rows.forEach((row) => {
+      const key = buildRowKey(row);
+      const existing = rowsByKey.get(key);
+      if (!existing || row.price < existing.price) {
+        rowsByKey.set(key, row);
+      }
+    });
+    const afterCount = rowsByKey.size;
+    if (afterCount === beforeCount) {
+      noNewRowsPasses += 1;
+    } else {
+      noNewRowsPasses = 0;
+    }
+
+    const metrics = await page.evaluate(() => {
+      const root = document.scrollingElement || document.documentElement || document.body;
+      const viewport = window.innerHeight || root.clientHeight || 0;
+      const currentTop = Math.round(
+        window.scrollY || window.pageYOffset || root.scrollTop || 0
+      );
+      const maxTop = Math.max(0, root.scrollHeight - viewport);
+      const nextTop = Math.min(maxTop, currentTop + Math.max(420, Math.floor(viewport * 0.85)));
+
+      if (nextTop > currentTop) {
+        window.scrollTo(0, nextTop);
+      }
+
+      return {
+        currentTop,
+        nextTop,
+        maxTop,
+        scrollHeight: root.scrollHeight
+      };
+    });
+
+    await pause(450);
+
+    if (metrics.scrollHeight === previousHeight) {
+      stablePasses += 1;
+    } else {
+      stablePasses = 0;
+      previousHeight = metrics.scrollHeight;
+    }
+
+    const reachedEnd = metrics.nextTop >= metrics.maxTop || metrics.nextTop === metrics.currentTop;
+    if (noNewRowsPasses >= 3) {
+      break;
+    }
+    if (reachedEnd && stablePasses >= 2) {
+      break;
+    }
+  }
+
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await pause(250);
+
+  return Array.from(rowsByKey.values());
 };
 
 const nextPage = async (page: Page) => {
@@ -838,7 +952,7 @@ const scrapeQuoteSet = async (
   const seenPages = new Set<string>();
 
   while (true) {
-    const pageRows = await collectCurrentPageRows(
+    const pageRows = await collectRowsAcrossLazyContent(
       page,
       pickupDate,
       dropoffDate,
