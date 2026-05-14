@@ -18,6 +18,9 @@ const SCRAPER_API_BASE =
 const PRICING_API_BASE =
   process.env.REACT_APP_PRICING_API_URL || `http://${browserHost}:4302`;
 const SCRAPER_TRIGGER_TOKEN = process.env.REACT_APP_SCRAPER_TRIGGER_TOKEN || "";
+const DASHBOARD_LOGIN_USER = process.env.REACT_APP_DASHBOARD_LOGIN_USER || "";
+const DASHBOARD_LOGIN_PASS = process.env.REACT_APP_DASHBOARD_LOGIN_PASS || "";
+const DASHBOARD_AUTH_STORAGE_KEY = "camper_dashboard_login_v1";
 
 const vehicleConfigs = {
   "trek budget": {
@@ -2063,7 +2066,7 @@ function MarketSpreadChart({
   );
 }
 
-function App() {
+function DashboardApp() {
   const [rows, setRows] = useState([]);
   const [trendData, setTrendData] = useState([]);
   const [trendActiveDateKey, setTrendActiveDateKey] = useState("");
@@ -4161,6 +4164,155 @@ function App() {
           </div>
         </section>
       </main>
+    </div>
+  );
+}
+
+function App() {
+  const loginEnabled = Boolean(DASHBOARD_LOGIN_USER && DASHBOARD_LOGIN_PASS);
+  const authMarker = `${DASHBOARD_LOGIN_USER}:${DASHBOARD_LOGIN_PASS}`;
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [loginError, setLoginError] = useState("");
+  const [isAuthenticated, setIsAuthenticated] = useState(() => {
+    if (!loginEnabled || typeof window === "undefined") {
+      return true;
+    }
+    return window.localStorage.getItem(DASHBOARD_AUTH_STORAGE_KEY) === authMarker;
+  });
+
+  const handleLoginSubmit = (event) => {
+    event.preventDefault();
+    const userOk = username.trim() === DASHBOARD_LOGIN_USER;
+    const passOk = password === DASHBOARD_LOGIN_PASS;
+
+    if (!userOk || !passOk) {
+      setLoginError("Invalid username or password");
+      return;
+    }
+
+    window.localStorage.setItem(DASHBOARD_AUTH_STORAGE_KEY, authMarker);
+    setIsAuthenticated(true);
+    setLoginError("");
+    setPassword("");
+  };
+
+  const handleSignOut = () => {
+    window.localStorage.removeItem(DASHBOARD_AUTH_STORAGE_KEY);
+    setIsAuthenticated(false);
+  };
+
+  if (!loginEnabled) {
+    return <DashboardApp />;
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <div
+        style={{
+          minHeight: "100vh",
+          display: "grid",
+          placeItems: "center",
+          background: "linear-gradient(145deg, #f3efe6 0%, #e6f0eb 100%)",
+          padding: "24px"
+        }}
+      >
+        <form
+          onSubmit={handleLoginSubmit}
+          style={{
+            width: "100%",
+            maxWidth: "420px",
+            background: "rgba(255,255,255,0.92)",
+            border: "1px solid rgba(30, 58, 37, 0.16)",
+            borderRadius: "18px",
+            padding: "24px",
+            boxShadow: "0 16px 48px rgba(17, 24, 39, 0.12)"
+          }}
+        >
+          <h2 style={{ margin: "0 0 8px", color: "#1f3628" }}>Elements World Dashboard</h2>
+          <p style={{ margin: "0 0 18px", color: "#475569" }}>
+            Sign in to access pricing controls and scraper actions.
+          </p>
+
+          <label style={{ display: "grid", gap: "6px", marginBottom: "12px" }}>
+            <span style={{ fontWeight: 600, color: "#1f2937" }}>Username</span>
+            <input
+              type="text"
+              value={username}
+              onChange={(event) => setUsername(event.target.value)}
+              autoComplete="username"
+              required
+              style={{
+                border: "1px solid #cbd5e1",
+                borderRadius: "10px",
+                padding: "10px 12px",
+                fontSize: "15px"
+              }}
+            />
+          </label>
+
+          <label style={{ display: "grid", gap: "6px", marginBottom: "14px" }}>
+            <span style={{ fontWeight: 600, color: "#1f2937" }}>Password</span>
+            <input
+              type="password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              autoComplete="current-password"
+              required
+              style={{
+                border: "1px solid #cbd5e1",
+                borderRadius: "10px",
+                padding: "10px 12px",
+                fontSize: "15px"
+              }}
+            />
+          </label>
+
+          {loginError ? (
+            <p style={{ margin: "0 0 12px", color: "#b91c1c", fontWeight: 600 }}>{loginError}</p>
+          ) : null}
+
+          <button
+            type="submit"
+            style={{
+              width: "100%",
+              border: "none",
+              borderRadius: "10px",
+              padding: "11px 14px",
+              background: "#1f5a3a",
+              color: "#fff",
+              fontWeight: 700,
+              cursor: "pointer"
+            }}
+          >
+            Sign in
+          </button>
+        </form>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ position: "relative" }}>
+      <button
+        type="button"
+        onClick={handleSignOut}
+        style={{
+          position: "fixed",
+          top: "12px",
+          right: "12px",
+          zIndex: 50,
+          border: "1px solid rgba(15, 23, 42, 0.18)",
+          background: "rgba(255,255,255,0.92)",
+          borderRadius: "10px",
+          padding: "8px 12px",
+          cursor: "pointer",
+          fontWeight: 600
+        }}
+      >
+        Sign out
+      </button>
+      <DashboardApp />
     </div>
   );
 }
