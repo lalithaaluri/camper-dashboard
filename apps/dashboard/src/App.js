@@ -74,11 +74,6 @@ const vehicleConfigs = {
   }
 };
 
-const locationOptions = [
-  { value: "", label: "All depots" },
-  { value: "auckland", label: "Auckland" },
-  { value: "christchurch", label: "Christchurch" }
-];
 const routeLocationOptions = [
   { value: "", label: "Same as Pick Up" },
   { value: "auckland", label: "Auckland" },
@@ -181,7 +176,6 @@ function normalizeVehicle(v) {
   return v.trim().replace(/\s+/g, " ");
 }
 
-const normalizeVehicleMatch = (value) => normalizeVehicle(value);
 const normalizeVehicleName = (name) => normalizeVehicle(name);
 const isValidCompetitorPriceRow = (row) =>
   Number.isFinite(Number(row?.price)) && Number(row.price) > 10;
@@ -2650,15 +2644,6 @@ function DashboardApp() {
   });
   const effectivePickupRouteFilter = appliedPickupLocation || selectedLocationForLegacyFilters || "";
   const effectiveDropoffRouteFilter = appliedDropoffLocation || effectivePickupRouteFilter || "";
-  const competitorQuoteSnapshot = buildCompetitorQuoteSnapshot({
-    rows,
-    selectedPickup: selectedPickupDate,
-    selectedDropoff: selectedDropoffDate,
-    selectedVehicle: vehicle,
-    selectedLocation: selectedLocationForLegacyFilters,
-    selectedPickupLocation: effectivePickupRouteFilter,
-    selectedDropoffLocation: effectiveDropoffRouteFilter
-  });
   const mappedCompetitorTokens = getMappedCompetitors(vehicle);
   const selectedTripRows = rows.filter(
     (row) =>
@@ -2860,20 +2845,7 @@ function DashboardApp() {
     Number.isNaN(recommendedPricing.recommendedDailyRate)
       ? null
       : Math.round(recommendedPricing.recommendedDailyRate);
-  const recommendedPrice =
-    recommendationBaselinePrice === null ||
-    recommendationBaselinePrice === undefined
-      ? null
-      : recommendedPricing.recommendedTotalPrice === null ||
-        recommendedPricing.recommendedTotalPrice === undefined ||
-        Number.isNaN(recommendedPricing.recommendedTotalPrice)
-      ? null
-      : Math.round(recommendedPricing.recommendedTotalPrice);
   const recommendationDetail = recommendationReasonMessage;
-  const marketGap =
-    elementsDailyRate !== null && marketAverage !== null
-      ? elementsDailyRate - marketAverage
-      : null;
   const hasMarketAverage =
     marketAverage !== null &&
     marketAverage !== undefined &&
