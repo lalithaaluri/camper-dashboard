@@ -17,6 +17,7 @@ const SCRAPER_API_BASE =
   process.env.REACT_APP_SCRAPER_API_URL || `http://${browserHost}:4301`;
 const PRICING_API_BASE =
   process.env.REACT_APP_PRICING_API_URL || `http://${browserHost}:4302`;
+const SCRAPER_TRIGGER_TOKEN = process.env.REACT_APP_SCRAPER_TRIGGER_TOKEN || "";
 
 const vehicleConfigs = {
   "trek budget": {
@@ -3203,7 +3204,8 @@ function App() {
       const response = await fetch(`${SCRAPER_API_BASE}/api/runs`, {
         method: "POST",
         headers: {
-          "Content-Type": "application/json"
+          "Content-Type": "application/json",
+          ...(SCRAPER_TRIGGER_TOKEN ? { "x-dashboard-token": SCRAPER_TRIGGER_TOKEN } : {})
         },
         body: JSON.stringify(requestPayload)
       });

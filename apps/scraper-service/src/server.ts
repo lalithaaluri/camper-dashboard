@@ -17,11 +17,18 @@ import {
   writeDataset,
   writeRunArtifact
 } from "./storage.js";
-import type { DepotCode, RoutePair, RunSummary, ScrapeRequest } from "./types.js";
+import type { DepotCode, PriceRow, RoutePair, RunSummary, ScrapeRequest } from "./types.js";
 
 const app = express();
 const port = Number(process.env.PORT || 4301);
 const host = process.env.HOST || "0.0.0.0";
+const pricingApiBaseUrl = (process.env.PRICING_API_BASE_URL || "").trim().replace(/\/+$/, "");
+const internalIngestToken = (process.env.INTERNAL_INGEST_TOKEN || "").trim();
+const dashboardTriggerToken = (process.env.DASHBOARD_TRIGGER_TOKEN || "").trim();
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
+  .split(",")
+  .map((value) => value.trim())
+  .filter(Boolean);
 let activeRunId: string | null = null;
 const AUTO_RUN = false;
 const depotSchema = z.enum(["auckland", "christchurch"]);
@@ -146,10 +153,63 @@ const recoverStaleRunLock = async () => {
   return recoveredRun;
 };
 
-app.use(cors());
+const ingestRowsToApi = async (runId: string, rows: PriceRow[]) => {
+  if (!pricingApiBaseUrl) {
+    return null;
+  }
+  if (!internalIngestToken) {
+    throw new Error("INTERNAL_INGEST_TOKEN is required when PRICING_API_BASE_URL is set");
+  }
+
+  const url = `${pricingApiBaseUrl}/api/internal/ingest-rows`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-internal-token": internalIngestToken
+    },
+    body: JSON.stringify({ runId, rows })
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Failed ingest to API (${response.status}): ${body}`);
+  }
+  const payload = (await response.json()) as { inserted?: number };
+  return Number(payload.inserted ?? 0);
+};
+
+const isAllowedOrigin = (origin: string) =>
+  allowedOrigins.length === 0 || allowedOrigins.includes(origin);
+
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin || isAllowedOrigin(origin)) {
+        callback(null, true);
+        return;
+      }
+      callback(new Error("CORS origin not allowed"));
+    }
+  })
+);
 app.use(express.json());
 app.use("/artifacts", express.static(paths.artifactsDir));
 app.use("/data", express.static(paths.dataDir));
+
+const requireDashboardTriggerToken: express.RequestHandler = (request, response, next) => {
+  if (!dashboardTriggerToken) {
+    response.status(503).json({ error: "DASHBOARD_TRIGGER_TOKEN is not configured" });
+    return;
+  }
+
+  const token = (request.get("x-dashboard-token") || "").trim();
+  if (!token || token !== dashboardTriggerToken) {
+    response.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+
+  next();
+};
 
 app.get("/api/health", async (_request, response) => {
   await clearStaleActiveRunLock();
@@ -175,7 +235,7 @@ app.get("/api/runs", async (_request, response) => {
   response.json(await loadRunHistory());
 });
 
-app.post("/api/runs", async (request, response) => {
+app.post("/api/runs", requireDashboardTriggerToken, async (request, response) => {
   await clearStaleActiveRunLock();
   if (activeRunId) {
     response.status(409).json({
@@ -223,7 +283,8 @@ app.post("/api/runs", async (request, response) => {
         });
       });
       const rowsProcessed = result.rowsProcessed;
-      const rowsInserted = await insertPricingRows(result.rows);
+      const apiInserted = await ingestRowsToApi(run.id, result.rows);
+      const rowsInserted = apiInserted ?? (await insertPricingRows(result.rows));
       const totalRows = await getPricingDataRowCount();
       if (shouldWriteCsvBackup()) {
         await writeDataset(await loadDataset());
@@ -257,7 +318,7 @@ app.post("/api/runs", async (request, response) => {
   response.status(202).json(run);
 });
 
-app.post("/api/fix-trek-june-auckland", async (req, res) => {
+app.post("/api/fix-trek-june-auckland", requireDashboardTriggerToken, async (req, res) => {
   try {
     // Step 1: remove incorrect Trek data from that scrape batch
     const deleted = await deleteBadTrekScrapeBatch();
@@ -275,7 +336,8 @@ app.post("/api/fix-trek-june-auckland", async (req, res) => {
     );
 
     // Step 3: insert corrected rows
-    const inserted = await insertPricingRows(result.rows);
+    const apiInserted = await ingestRowsToApi(`fix-trek-june-auckland-${Date.now()}`, result.rows);
+    const inserted = apiInserted ?? (await insertPricingRows(result.rows));
 
     res.json({
       success: true,

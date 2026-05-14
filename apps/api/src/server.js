@@ -13,6 +13,11 @@ process.on("unhandledRejection", (err) => {
 const app = express();
 const port = Number(process.env.PORT || 4302);
 const host = process.env.HOST || "0.0.0.0";
+const internalIngestToken = (process.env.INTERNAL_INGEST_TOKEN || "").trim();
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
+  .split(",")
+  .map((value) => value.trim())
+  .filter(Boolean);
 
 const NORMALIZED_SCRAPE_DATE_SQL = `
   CASE
@@ -93,9 +98,91 @@ function buildRouteFilters(query) {
   return { conditions, params };
 }
 
-app.use(cors());
+const isAllowedOrigin = (origin) =>
+  allowedOrigins.length === 0 || allowedOrigins.includes(origin);
+
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin || isAllowedOrigin(origin)) {
+        callback(null, true);
+        return;
+      }
+      callback(new Error("CORS origin not allowed"));
+    }
+  })
+);
 app.options(/.*/, cors());
 app.use(express.json());
+
+const insertPricingRows = (rows) => {
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return 0;
+  }
+
+  const db = getDb();
+  const insert = db.prepare(`
+    INSERT INTO pricing_data (
+      pickup_date,
+      dropoff_date,
+      location,
+      pickup_location,
+      dropoff_location,
+      company,
+      vehicle,
+      price,
+      website_daily_rate,
+      scrape_date,
+      type
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  let inserted = 0;
+  db.exec("BEGIN");
+  try {
+    for (const row of rows) {
+      if (!row || typeof row !== "object") continue;
+      const location = String(row.location || "").trim().toLowerCase();
+      const pickupLocation = String(row.pickup_location || location).trim().toLowerCase();
+      const dropoffLocation = String(row.dropoff_location || location).trim().toLowerCase();
+      const price = Number(row.price);
+      if (!location || !Number.isFinite(price)) continue;
+
+      insert.run(
+        String(row.pickup_date || ""),
+        String(row.dropoff_date || ""),
+        location,
+        pickupLocation,
+        dropoffLocation,
+        String(row.company || "").trim().toLowerCase(),
+        String(row.vehicle || "").trim().toLowerCase(),
+        price,
+        row.website_daily_rate === null || row.website_daily_rate === undefined
+          ? null
+          : Number(row.website_daily_rate),
+        String(row.scrape_date || ""),
+        String(row.type || "competitor").trim().toLowerCase() === "elements" ? "elements" : "competitor"
+      );
+      inserted += 1;
+    }
+    db.exec("COMMIT");
+    return inserted;
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+};
+
+const requireInternalIngestToken = (req, res, next) => {
+  if (!internalIngestToken) {
+    return res.status(503).json({ error: "INTERNAL_INGEST_TOKEN is not configured" });
+  }
+  const headerValue = (req.get("x-internal-token") || "").trim();
+  if (!headerValue || headerValue !== internalIngestToken) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  return next();
+};
 
 app.get("/api/health", (req, res) => {
   try {
@@ -104,6 +191,23 @@ app.get("/api/health", (req, res) => {
   } catch (err) {
     console.error("HEALTH ERROR:", err);
     res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/internal/ingest-rows", requireInternalIngestToken, (req, res) => {
+  try {
+    const runId = String(req.body?.runId || "");
+    const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+    const inserted = insertPricingRows(rows);
+    res.json({
+      ok: true,
+      runId,
+      received: rows.length,
+      inserted
+    });
+  } catch (err) {
+    console.error("INGEST ERROR:", err);
+    res.status(500).json({ error: "Failed to ingest rows" });
   }
 });
 
