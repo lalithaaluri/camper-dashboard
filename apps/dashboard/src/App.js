@@ -2245,8 +2245,7 @@ function DashboardApp() {
         }
         // Keep payloads bounded so seeded historical datasets stay responsive.
         // Keep UI payloads small enough for browser parsing/rendering on hosted envs.
-        queryParams.set("max_scrape_dates", "14");
-        queryParams.set("max_pickup_dates", "60");
+        queryParams.set("max_pickup_dates", "14");
         const query = queryParams.toString() ? `?${queryParams.toString()}` : "";
         const pricesUrl = `${PRICING_API_BASE}/api/prices/latest${query}`;
         const trendsUrl = `${PRICING_API_BASE}/api/trends${query}`;
