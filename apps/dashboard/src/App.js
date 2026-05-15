@@ -2332,6 +2332,9 @@ function DashboardApp() {
         console.log("Prices count:", cleanedRows.length);
         console.log("Trends count:", cleanedTrendRows.length);
       } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") {
+          return;
+        }
         if (!cancelled) {
           console.error("API error:", err);
           setLoadError(err instanceof Error ? err.message : "Failed to fetch data from API");
