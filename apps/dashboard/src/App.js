@@ -2250,9 +2250,14 @@ function DashboardApp() {
         const query = queryParams.toString() ? `?${queryParams.toString()}` : "";
         const pricesUrl = `${PRICING_API_BASE}/api/prices/latest${query}`;
         const trendsQueryParams = new URLSearchParams(queryParams);
-        // Broader date coverage for trend/competitor analysis once that tab is open.
-        const broadTrendWindow = activeTab === "trend" || activeTab === "competitors";
-        trendsQueryParams.set("max_pickup_dates", broadTrendWindow ? "60" : "7");
+        // Trend view should show full route timeline, not the overview's narrow window.
+        if (activeTab === "trend") {
+          trendsQueryParams.delete("max_pickup_dates");
+        } else if (activeTab === "competitors") {
+          trendsQueryParams.set("max_pickup_dates", "60");
+        } else {
+          trendsQueryParams.set("max_pickup_dates", "7");
+        }
         const trendsQuery = trendsQueryParams.toString()
           ? `?${trendsQueryParams.toString()}`
           : "";
