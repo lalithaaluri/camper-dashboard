@@ -2245,11 +2245,14 @@ function DashboardApp() {
         }
         // Keep payloads bounded so seeded historical datasets stay responsive.
         // Keep UI payloads small enough for browser parsing/rendering on hosted envs.
+        // Fast first paint: keep overview payload tight.
         queryParams.set("max_pickup_dates", "14");
         const query = queryParams.toString() ? `?${queryParams.toString()}` : "";
         const pricesUrl = `${PRICING_API_BASE}/api/prices/latest${query}`;
         const trendsQueryParams = new URLSearchParams(queryParams);
-        trendsQueryParams.set("max_pickup_dates", "7");
+        // Broader date coverage for trend/competitor analysis once that tab is open.
+        const broadTrendWindow = activeTab === "trend" || activeTab === "competitors";
+        trendsQueryParams.set("max_pickup_dates", broadTrendWindow ? "60" : "7");
         const trendsQuery = trendsQueryParams.toString()
           ? `?${trendsQueryParams.toString()}`
           : "";
@@ -2380,7 +2383,7 @@ function DashboardApp() {
         window.clearTimeout(timerId);
       }
     };
-  }, [dataReloadTrigger, appliedPickupLocation, appliedDropoffLocation]);
+  }, [dataReloadTrigger, appliedPickupLocation, appliedDropoffLocation, activeTab]);
 
   useEffect(() => {
     if (!loading) {
