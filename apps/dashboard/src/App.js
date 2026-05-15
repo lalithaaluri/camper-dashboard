@@ -2794,6 +2794,36 @@ function DashboardApp() {
   const elementsRow = finalDisplayRows.find((row) => row.isElements) || null;
   const quoteTableRows = finalDisplayRows;
   const quoteRows = finalDisplayRows.filter((row) => !row.isElements);
+  const competitorTabDisplayRows = selectLatestRowsBySnapshot(
+    selectedTripRows
+      .filter((row) => Number.isFinite(Number(row.price)) && Number(row.price) > 10)
+      .map((row) => {
+        const durationDays = getRowDurationDays(row);
+        const dailyRate = resolveTrendDailyRate({ ...row, durationDays });
+
+        return {
+          ...row,
+          normalizedVehicle: normalizeVehicleName(row.vehicle),
+          durationDays,
+          dailyRate,
+          isElements: normalize(row.company) === "elementsworld"
+        };
+      })
+  ).sort((left, right) => {
+    if (left.isElements !== right.isElements) {
+      return left.isElements ? -1 : 1;
+    }
+    const leftRate = Number.isFinite(Number(left.dailyRate))
+      ? Number(left.dailyRate)
+      : Number.POSITIVE_INFINITY;
+    const rightRate = Number.isFinite(Number(right.dailyRate))
+      ? Number(right.dailyRate)
+      : Number.POSITIVE_INFINITY;
+    if (leftRate !== rightRate) {
+      return leftRate - rightRate;
+    }
+    return `${left.company}|${left.vehicle}`.localeCompare(`${right.company}|${right.vehicle}`);
+  });
   const showNoTripData = Boolean(
     selectedPickupDate && selectedDropoffDate && !exactTripMetrics.hasExactMatch
   );
@@ -3092,14 +3122,15 @@ function DashboardApp() {
         ? "No new data (already exists)"
         : `${formatCount(latestRun?.rowsInserted || 0)} new rows inserted`
       : "";
-  const cheapestQuoteRow = quoteTableRows.find((row) => !row.isElements) || null;
+  const tableRows = activeTab === "competitors" ? competitorTabDisplayRows : quoteTableRows;
+  const cheapestQuoteRow = tableRows.find((row) => !row.isElements) || null;
   const cheapestCompetitorPrice =
     cheapestQuoteRow && Number.isFinite(Number(cheapestQuoteRow.dailyRate))
       ? Number(cheapestQuoteRow.dailyRate)
       : null;
   const highestQuoteRow =
-    quoteTableRows.length > 0
-      ? [...quoteTableRows]
+    tableRows.length > 0
+      ? [...tableRows]
           .filter((row) => !row.isElements)
           .sort((left, right) => Number(right.dailyRate) - Number(left.dailyRate))[0] || null
       : null;
@@ -3801,8 +3832,8 @@ function DashboardApp() {
                 </tr>
               </thead>
               <tbody>
-                {quoteTableRows.length ? (
-                  quoteTableRows.map((row) => {
+                {tableRows.length ? (
+                  tableRows.map((row) => {
                     const isCheapestCompetitor =
                       Boolean(cheapestQuoteRow) &&
                       !row.isElements &&
@@ -3877,7 +3908,7 @@ function DashboardApp() {
                 ) : (
                   <tr>
                     <td colSpan="8" className="table-empty">
-                      No competitor data available for selected date
+                      No market rows available for selected date
                     </td>
                   </tr>
                 )}
