@@ -2248,32 +2248,26 @@ function DashboardApp() {
         queryParams.set("max_pickup_dates", "14");
         const query = queryParams.toString() ? `?${queryParams.toString()}` : "";
         const pricesUrl = `${PRICING_API_BASE}/api/prices/latest${query}`;
-        const trendsUrl = `${PRICING_API_BASE}/api/trends${query}`;
+        const trendsQueryParams = new URLSearchParams(queryParams);
+        trendsQueryParams.set("max_pickup_dates", "7");
+        const trendsQuery = trendsQueryParams.toString()
+          ? `?${trendsQueryParams.toString()}`
+          : "";
+        const trendsUrl = `${PRICING_API_BASE}/api/trends${trendsQuery}`;
         console.log("[DASHBOARD][API] Fetching price endpoints", { pricesUrl, trendsUrl });
 
-        const [pricesResponse, trendsResponse] = await Promise.all([
-          fetch(pricesUrl, { signal: controller.signal }),
-          fetch(trendsUrl, { signal: controller.signal })
-        ]);
+        const pricesResponse = await fetch(pricesUrl, { signal: controller.signal });
         console.log("[DASHBOARD][API] Responses", {
-          pricesStatus: pricesResponse.status,
-          trendsStatus: trendsResponse.status
+          pricesStatus: pricesResponse.status
         });
 
         if (!pricesResponse.ok) {
           throw new Error(`Failed to fetch data from API (status: ${pricesResponse.status})`);
         }
-        if (!trendsResponse.ok) {
-          throw new Error(`Failed to fetch data from API (status: ${trendsResponse.status})`);
-        }
 
-        const [pricesApiRows, trendsApiRows] = await Promise.all([
-          pricesResponse.json(),
-          trendsResponse.json()
-        ]);
+        const pricesApiRows = await pricesResponse.json();
         console.log("[DASHBOARD][API] Row counts", {
-          latestRows: Array.isArray(pricesApiRows) ? pricesApiRows.length : 0,
-          trendsRows: Array.isArray(trendsApiRows) ? trendsApiRows.length : 0
+          latestRows: Array.isArray(pricesApiRows) ? pricesApiRows.length : 0
         });
 
         if (cancelled) {
@@ -2325,12 +2319,30 @@ function DashboardApp() {
             .filter(Boolean);
 
         const cleanedRows = toDashboardRows(pricesApiRows);
-        const cleanedTrendRows = toDashboardRows(trendsApiRows);
 
         setRows(cleanedRows);
-        setTrendData(cleanedTrendRows);
         console.log("Prices count:", cleanedRows.length);
-        console.log("Trends count:", cleanedTrendRows.length);
+
+        // Trend data is secondary; load it in background so initial render stays reliable.
+        try {
+          const trendsResponse = await fetch(trendsUrl, { signal: controller.signal });
+          if (trendsResponse.ok) {
+            const trendsApiRows = await trendsResponse.json();
+            if (!cancelled) {
+              const cleanedTrendRows = toDashboardRows(trendsApiRows);
+              setTrendData(cleanedTrendRows);
+              console.log("Trends count:", cleanedTrendRows.length);
+            }
+          } else {
+            console.warn("[DASHBOARD][API] Trends endpoint failed", {
+              status: trendsResponse.status
+            });
+          }
+        } catch (trendError) {
+          if (!(trendError instanceof DOMException && trendError.name === "AbortError")) {
+            console.warn("[DASHBOARD][API] Trends fetch error", trendError);
+          }
+        }
       } catch (err) {
         if (err instanceof DOMException && err.name === "AbortError") {
           return;
