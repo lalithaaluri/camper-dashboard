@@ -2244,8 +2244,9 @@ function DashboardApp() {
           queryParams.set("dropoff_location", appliedPickupLocation);
         }
         // Keep payloads bounded so seeded historical datasets stay responsive.
-        queryParams.set("max_scrape_dates", "45");
-        queryParams.set("max_pickup_dates", "180");
+        // Keep UI payloads small enough for browser parsing/rendering on hosted envs.
+        queryParams.set("max_scrape_dates", "14");
+        queryParams.set("max_pickup_dates", "60");
         const query = queryParams.toString() ? `?${queryParams.toString()}` : "";
         const pricesUrl = `${PRICING_API_BASE}/api/prices/latest${query}`;
         const trendsUrl = `${PRICING_API_BASE}/api/trends${query}`;
@@ -2375,7 +2376,7 @@ function DashboardApp() {
     const watchdogId = window.setTimeout(() => {
       setLoadError((current) => current || "Dashboard load timed out");
       setLoading(false);
-    }, 20000);
+    }, 120000);
 
     return () => {
       window.clearTimeout(watchdogId);
