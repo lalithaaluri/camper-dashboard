@@ -2575,14 +2575,14 @@ function DashboardApp() {
       relevantTrendRows.push(row);
     });
     console.log("FILTERED DATA:", relevantTrendRows.length);
-    console.log("Filters:", vehicle, selectedLocationForLegacyFilters, [selectedPickupDate, selectedDropoffDate]);
+    console.log("Filters:", vehicle, selectedLocationForLegacyFilters);
 
     setTrendDashboard(
       buildDashboardFromRows({
         rows: relevantTrendRows,
         config,
         adjustment,
-        selectedDate: selectedPickupDate,
+        selectedDate: "",
         selectedVehicle: vehicle,
         selectedPickupLocation: appliedPickupLocation,
         selectedDropoffLocation: appliedDropoffLocation || appliedPickupLocation
@@ -2592,8 +2592,6 @@ function DashboardApp() {
     adjustment,
     selectedLocationForLegacyFilters,
     trendData,
-    selectedPickupDate,
-    selectedDropoffDate,
     vehicle,
     appliedPickupLocation,
     appliedDropoffLocation
