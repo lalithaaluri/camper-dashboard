@@ -23,7 +23,11 @@
    - `HOST=0.0.0.0`
    - `PORT=4302` (optional; Railway usually injects `PORT`)
    - `INTERNAL_INGEST_TOKEN=<long-random-token>`
-5. Deploy and copy API public URL, for example:
+   - `PRICING_DB_PATH=/app/data/pricing.db`
+5. Attach a Railway Volume to the API service:
+   - Mount Path: `/app/data`
+   - Do not mount to `/app` (that can hide app files).
+6. Deploy and copy API public URL, for example:
    - `https://api-production-xxxx.up.railway.app`
 
 ## 2) Deploy Scraper (Railway)
@@ -50,7 +54,7 @@
    - Build command: `npm run build`
    - Publish directory: `build`
 4. Environment variables:
-   - `REACT_APP_PRICING_API_URL=<API URL>/api`
+   - `REACT_APP_PRICING_API_URL=<API URL>`
    - `REACT_APP_SCRAPER_API_URL=<Scraper URL>`
 5. Deploy and copy dashboard URL:
    - `https://<site-name>.netlify.app`
@@ -75,4 +79,3 @@
 - In cloud mode, scraper sends rows to API via this endpoint when:
   - `PRICING_API_BASE_URL` is set.
 - Local/VM mode still works as before when `PRICING_API_BASE_URL` is not set.
-

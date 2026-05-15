@@ -2,8 +2,23 @@ const fs = require("fs");
 const path = require("path");
 const Database = require("better-sqlite3");
 
-const dataDir = path.join(__dirname, "..", "data");
-const dbPath = path.join(dataDir, "pricing.db");
+const defaultDataDir = path.join(__dirname, "..", "data");
+const configuredDbPath = String(process.env.PRICING_DB_PATH || "").trim();
+const railwayVolumeMountPath = String(process.env.RAILWAY_VOLUME_MOUNT_PATH || "").trim();
+
+const dbPath = (() => {
+  if (configuredDbPath) {
+    return path.resolve(configuredDbPath);
+  }
+
+  if (railwayVolumeMountPath) {
+    return path.join(railwayVolumeMountPath, "pricing.db");
+  }
+
+  return path.join(defaultDataDir, "pricing.db");
+})();
+
+const dataDir = path.dirname(dbPath);
 
 let db = null;
 
