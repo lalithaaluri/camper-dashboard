@@ -192,7 +192,7 @@ test("renders camper revenue dashboard", async () => {
   );
   expect(screen.queryByText(/latest pickup date/i)).not.toBeInTheDocument();
   expect(global.fetch).toHaveBeenCalledWith(
-    "http://localhost:4302/api/prices/latest?pickup_location=auckland&dropoff_location=auckland",
+    "http://localhost:4302/api/prices/latest?pickup_location=auckland&dropoff_location=auckland&max_pickup_dates=14",
     expect.objectContaining({ signal: expect.any(AbortSignal) })
   );
   expect(
@@ -200,7 +200,7 @@ test("renders camper revenue dashboard", async () => {
       const requestUrl = String(url);
       return (
         requestUrl ===
-          "http://localhost:4302/api/prices?pickup_location=auckland&dropoff_location=auckland" &&
+          "http://localhost:4302/api/trends?pickup_location=auckland&dropoff_location=auckland&max_pickup_dates=7" &&
         options &&
         options.signal instanceof AbortSignal
       );

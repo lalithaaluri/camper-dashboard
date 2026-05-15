@@ -175,6 +175,28 @@ const seededRows: SeedRow[] = [
     price: 690,
     scrape_date: "2026-04-22",
     type: "competitor"
+  },
+  {
+    pickup_date: "6/30/2026",
+    dropoff_date: "7/2/2026",
+    location: "Auckland",
+    company: "elementsworld",
+    vehicle: "quad",
+    price: 450,
+    scrape_date: "4/5/2026",
+    type: "elements"
+  },
+  {
+    pickup_date: "2026-06-30",
+    dropoff_date: "2026-07-02",
+    location: "auckland",
+    pickup_location: "auckland",
+    dropoff_location: "auckland",
+    company: "elementsworld",
+    vehicle: "quad",
+    price: 291,
+    scrape_date: "2026-05-15",
+    type: "elements"
   }
 ];
 
@@ -463,6 +485,32 @@ describe("/api/prices baseline regression", () => {
     expect(jucyCrib).toMatchObject({
       scrape_date: "2026-04-22",
       price: 780
+    });
+  });
+
+  test("latest rows collapse mixed date formats and casing into one canonical trip key", async () => {
+    const response = await fetch(
+      `${apiBaseUrl}/api/prices/latest?pickup_location=auckland&dropoff_location=auckland`
+    );
+    expect(response.ok).toBe(true);
+
+    const rows = (await response.json()) as Array<
+      SeedRow & { pickup_location: string; dropoff_location: string }
+    >;
+    const targetRows = rows.filter(
+      (row) =>
+        row.pickup_date === "2026-06-30" &&
+        row.dropoff_date === "2026-07-02" &&
+        row.company === "elementsworld" &&
+        row.vehicle === "quad"
+    );
+
+    expect(targetRows).toHaveLength(1);
+    expect(targetRows[0]).toMatchObject({
+      price: 291,
+      scrape_date: "2026-05-15",
+      pickup_location: "auckland",
+      dropoff_location: "auckland"
     });
   });
 });

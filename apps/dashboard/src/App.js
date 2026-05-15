@@ -800,8 +800,25 @@ const collectBucketMetrics = (bucket, options = {}) => {
     const dropoffMatch = !normalizedDropoffLocation || rowDropoff === normalizedDropoffLocation;
     return pickupMatch && dropoffMatch;
   });
-  const competitorRows = (bucket?.competitorCandidates || [])
-    .filter(isValidCompetitorPriceRow)
+
+  const competitorCandidates = (bucket?.competitorCandidates || []).filter((row) => {
+    if (!isValidCompetitorPriceRow(row)) {
+      return false;
+    }
+
+    if (!normalizedPickupLocation && !normalizedDropoffLocation) {
+      return true;
+    }
+
+    return matchesCompetitorRouteSelection(row, {
+      selectedPickupLocation: normalizedPickupLocation,
+      selectedDropoffLocation: normalizedDropoffLocation,
+      selectedLocation: normalizedPickupLocation || normalizedDropoffLocation
+    });
+  });
+
+  const latestCompetitorCandidates = selectLatestCompetitorRows(competitorCandidates);
+  const competitorRows = latestCompetitorCandidates
     .map((row) => {
       const durationDays = getRowDurationDays(row);
       const trendDailyRate = resolveTrendDailyRate({ ...row, durationDays });
@@ -2321,7 +2338,7 @@ function DashboardApp() {
                   ? Number(row.website_daily_rate)
                   : null,
                 tripDays: calculateTripDays(dateObject, dropoffObject),
-                scrapeDate: parseDate(row.scrape_date)
+                scrapeDate: parseDate(toDateKey(row.scrape_date) || row.scrape_date)
               };
             })
             .filter(Boolean);
@@ -2797,36 +2814,7 @@ function DashboardApp() {
   const elementsRow = finalDisplayRows.find((row) => row.isElements) || null;
   const quoteTableRows = finalDisplayRows;
   const quoteRows = finalDisplayRows.filter((row) => !row.isElements);
-  const competitorTabDisplayRows = selectLatestRowsBySnapshot(
-    selectedTripRows
-      .filter((row) => Number.isFinite(Number(row.price)) && Number(row.price) > 10)
-      .map((row) => {
-        const durationDays = getRowDurationDays(row);
-        const dailyRate = resolveTrendDailyRate({ ...row, durationDays });
-
-        return {
-          ...row,
-          normalizedVehicle: normalizeVehicleName(row.vehicle),
-          durationDays,
-          dailyRate,
-          isElements: normalize(row.company) === "elementsworld"
-        };
-      })
-  ).sort((left, right) => {
-    if (left.isElements !== right.isElements) {
-      return left.isElements ? -1 : 1;
-    }
-    const leftRate = Number.isFinite(Number(left.dailyRate))
-      ? Number(left.dailyRate)
-      : Number.POSITIVE_INFINITY;
-    const rightRate = Number.isFinite(Number(right.dailyRate))
-      ? Number(right.dailyRate)
-      : Number.POSITIVE_INFINITY;
-    if (leftRate !== rightRate) {
-      return leftRate - rightRate;
-    }
-    return `${left.company}|${left.vehicle}`.localeCompare(`${right.company}|${right.vehicle}`);
-  });
+  const competitorTabDisplayRows = finalDisplayRows;
   const showNoTripData = Boolean(
     selectedPickupDate && selectedDropoffDate && !exactTripMetrics.hasExactMatch
   );

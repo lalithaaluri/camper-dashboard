@@ -19,19 +19,22 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
   .map((value) => value.trim())
   .filter(Boolean);
 
-const NORMALIZED_SCRAPE_DATE_SQL = `
+const buildNormalizedDateSql = (columnExpression) => `
   CASE
-    WHEN scrape_date GLOB '????-??-??' THEN scrape_date
-    WHEN scrape_date LIKE '%/%/%' THEN
+    WHEN ${columnExpression} GLOB '????-??-??' THEN ${columnExpression}
+    WHEN ${columnExpression} LIKE '%/%/%' THEN
       printf(
         '%04d-%02d-%02d',
-        CAST(substr(substr(scrape_date, instr(scrape_date, '/') + 1), instr(substr(scrape_date, instr(scrape_date, '/') + 1), '/') + 1) AS INTEGER),
-        CAST(substr(scrape_date, 1, instr(scrape_date, '/') - 1) AS INTEGER),
-        CAST(substr(substr(scrape_date, instr(scrape_date, '/') + 1), 1, instr(substr(scrape_date, instr(scrape_date, '/') + 1), '/') - 1) AS INTEGER)
+        CAST(substr(substr(${columnExpression}, instr(${columnExpression}, '/') + 1), instr(substr(${columnExpression}, instr(${columnExpression}, '/') + 1), '/') + 1) AS INTEGER),
+        CAST(substr(${columnExpression}, 1, instr(${columnExpression}, '/') - 1) AS INTEGER),
+        CAST(substr(substr(${columnExpression}, instr(${columnExpression}, '/') + 1), 1, instr(substr(${columnExpression}, instr(${columnExpression}, '/') + 1), '/') - 1) AS INTEGER)
       )
     ELSE NULL
   END
 `;
+const NORMALIZED_SCRAPE_DATE_SQL = buildNormalizedDateSql("scrape_date");
+const NORMALIZED_PICKUP_DATE_SQL = buildNormalizedDateSql("pickup_date");
+const NORMALIZED_DROPOFF_DATE_SQL = buildNormalizedDateSql("dropoff_date");
 
 const DURATION_DAYS_SQL = `(julianday(dropoff_date) - julianday(pickup_date))`;
 const DAILY_RATE_SQL = `
@@ -357,8 +360,12 @@ app.get("/api/prices/latest", (req, res) => {
           WITH normalized AS (
             SELECT
               p.*,
-              COALESCE(p.pickup_location, p.location) AS pickup_location_key,
-              COALESCE(p.dropoff_location, p.location) AS dropoff_location_key,
+              LOWER(TRIM(COALESCE(p.pickup_location, p.location))) AS pickup_location_key,
+              LOWER(TRIM(COALESCE(p.dropoff_location, p.location))) AS dropoff_location_key,
+              LOWER(TRIM(COALESCE(p.company, ''))) AS company_key,
+              LOWER(TRIM(COALESCE(p.vehicle, ''))) AS vehicle_key,
+              ${NORMALIZED_PICKUP_DATE_SQL} AS pickup_date_key,
+              ${NORMALIZED_DROPOFF_DATE_SQL} AS dropoff_date_key,
               ${NORMALIZED_SCRAPE_DATE_SQL} AS scrape_date_key
             FROM pricing_data p
           ),
@@ -367,12 +374,12 @@ app.get("/api/prices/latest", (req, res) => {
               n.*,
               ROW_NUMBER() OVER (
                 PARTITION BY
-                  n.pickup_date,
-                  n.dropoff_date,
+                  n.pickup_date_key,
+                  n.dropoff_date_key,
                   n.pickup_location_key,
                   n.dropoff_location_key,
-                  n.company,
-                  n.vehicle
+                  n.company_key,
+                  n.vehicle_key
                 ORDER BY n.scrape_date_key DESC, n.id DESC
               ) AS rn
             FROM normalized n
@@ -383,12 +390,12 @@ app.get("/api/prices/latest", (req, res) => {
               n.*,
               ROW_NUMBER() OVER (
                 PARTITION BY
-                  n.pickup_date,
-                  n.dropoff_date,
+                  n.pickup_date_key,
+                  n.dropoff_date_key,
                   n.pickup_location_key,
                   n.dropoff_location_key,
-                  n.company,
-                  n.vehicle
+                  n.company_key,
+                  n.vehicle_key
                 ORDER BY n.scrape_date_key DESC, n.id DESC
               ) AS rn
             FROM normalized n
@@ -420,18 +427,19 @@ app.get("/api/prices/latest", (req, res) => {
                 LIMIT ?
               )` : ""}
             ${maxPickupDates ? `
-              AND l.pickup_date IN (
-                SELECT pickup_date
+              AND l.pickup_date_key IN (
+                SELECT pickup_date_key
                 FROM latest_rows_with_route
-                GROUP BY pickup_date
-                ORDER BY pickup_date DESC
+                WHERE pickup_date_key IS NOT NULL
+                GROUP BY pickup_date_key
+                ORDER BY pickup_date_key DESC
                 LIMIT ?
               )` : ""}
           )
           SELECT
             l.id,
-            l.pickup_date,
-            l.dropoff_date,
+            COALESCE(l.pickup_date_key, l.pickup_date) AS pickup_date,
+            COALESCE(l.dropoff_date_key, l.dropoff_date) AS dropoff_date,
             l.location,
             l.pickup_location,
             l.dropoff_location,
