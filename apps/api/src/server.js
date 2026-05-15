@@ -48,6 +48,14 @@ const DAILY_RATE_SQL_L = `
   END
 `;
 
+const parsePositiveInt = (value, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) => {
+  const parsed = Number.parseInt(String(value ?? "").trim(), 10);
+  if (!Number.isFinite(parsed) || parsed < min) {
+    return null;
+  }
+  return Math.min(parsed, max);
+};
+
 function normalizeVehicle(vehicle) {
   if (!vehicle) return vehicle;
 
@@ -234,33 +242,99 @@ app.get("/api/latest-scrape-date", (req, res) => {
   }
 });
 
+app.get("/api/stats", (req, res) => {
+  try {
+    const db = getDb();
+    const stats = db
+      .prepare(
+        `
+          SELECT
+            COUNT(*) AS row_count,
+            MAX(pickup_date) AS latest_pickup_date,
+            MAX(${NORMALIZED_SCRAPE_DATE_SQL}) AS latest_scrape_date
+          FROM pricing_data
+        `
+      )
+      .get();
+
+    res.json({
+      row_count: Number(stats?.row_count ?? 0),
+      latest_pickup_date: stats?.latest_pickup_date ?? null,
+      latest_scrape_date: stats?.latest_scrape_date ?? null
+    });
+  } catch (err) {
+    console.error("STATS ERROR:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get("/api/prices", (req, res) => {
   try {
     console.log("API HIT: /api/prices");
     const db = getDb();
     const { conditions, params } = buildRouteFilters(req.query);
+    const maxScrapeDates = parsePositiveInt(req.query.max_scrape_dates, { max: 365 });
+    const maxPickupDates = parsePositiveInt(req.query.max_pickup_dates, { max: 730 });
+    const scopedWhere = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    const limitParams = [];
+
+    if (maxScrapeDates) {
+      limitParams.push(maxScrapeDates);
+    }
+    if (maxPickupDates) {
+      limitParams.push(maxPickupDates);
+    }
+
     const rows = db
       .prepare(
         `
+          WITH scoped AS (
+            SELECT
+              p.*,
+              ${NORMALIZED_SCRAPE_DATE_SQL} AS scrape_date_key
+            FROM pricing_data p
+            ${scopedWhere}
+          ),
+          limited AS (
+            SELECT *
+            FROM scoped s
+            WHERE 1=1
+            ${maxScrapeDates ? `
+              AND s.scrape_date_key IN (
+                SELECT scrape_date_key
+                FROM scoped
+                WHERE scrape_date_key IS NOT NULL
+                GROUP BY scrape_date_key
+                ORDER BY scrape_date_key DESC
+                LIMIT ?
+              )` : ""}
+            ${maxPickupDates ? `
+              AND s.pickup_date IN (
+                SELECT pickup_date
+                FROM scoped
+                GROUP BY pickup_date
+                ORDER BY pickup_date DESC
+                LIMIT ?
+              )` : ""}
+          )
           SELECT
-            id,
-            pickup_date,
-            dropoff_date,
-            location,
-            COALESCE(pickup_location, location) AS pickup_location,
-            COALESCE(dropoff_location, location) AS dropoff_location,
-            company,
-            vehicle,
-            price,
-            website_daily_rate,
+            s.id,
+            s.pickup_date,
+            s.dropoff_date,
+            s.location,
+            COALESCE(s.pickup_location, s.location) AS pickup_location,
+            COALESCE(s.dropoff_location, s.location) AS dropoff_location,
+            s.company,
+            s.vehicle,
+            s.price,
+            s.website_daily_rate,
             ${DAILY_RATE_SQL} AS daily_rate,
-            scrape_date,
-            type
-          FROM pricing_data
-          ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""}
+            s.scrape_date,
+            s.type
+          FROM limited s
         `
       )
-      .all(...params);
+      .all(...params, ...limitParams);
     res.json(normalizeVehicleRows(rows));
   } catch (err) {
     console.error("API ERROR:", err);
@@ -273,6 +347,10 @@ app.get("/api/prices/latest", (req, res) => {
     console.log("API HIT: /api/prices/latest");
     const db = getDb();
     const { conditions, params } = buildRouteFilters(req.query);
+    const maxPickupDates = parsePositiveInt(req.query.max_pickup_dates, { max: 730 });
+    const maxScrapeDates = parsePositiveInt(req.query.max_scrape_dates, { max: 365 });
+    const pickupLimitParams = maxPickupDates ? [maxPickupDates] : [];
+    const scrapeLimitParams = maxScrapeDates ? [maxScrapeDates] : [];
     const rows = db
       .prepare(
         `
@@ -327,6 +405,28 @@ app.get("/api/prices/latest", (req, res) => {
               lr.pickup_location_key AS pickup_location,
               lr.dropoff_location_key AS dropoff_location
             FROM latest_rows lr
+          ),
+          latest_rows_limited AS (
+            SELECT *
+            FROM latest_rows_with_route l
+            WHERE 1=1
+            ${maxScrapeDates ? `
+              AND ${NORMALIZED_SCRAPE_DATE_SQL} IN (
+                SELECT ${NORMALIZED_SCRAPE_DATE_SQL} AS scrape_date_key
+                FROM latest_rows_with_route
+                WHERE ${NORMALIZED_SCRAPE_DATE_SQL} IS NOT NULL
+                GROUP BY scrape_date_key
+                ORDER BY scrape_date_key DESC
+                LIMIT ?
+              )` : ""}
+            ${maxPickupDates ? `
+              AND l.pickup_date IN (
+                SELECT pickup_date
+                FROM latest_rows_with_route
+                GROUP BY pickup_date
+                ORDER BY pickup_date DESC
+                LIMIT ?
+              )` : ""}
           )
           SELECT
             l.id,
@@ -342,11 +442,11 @@ app.get("/api/prices/latest", (req, res) => {
             ${DAILY_RATE_SQL_L} AS daily_rate,
             l.scrape_date,
             l.type
-          FROM latest_rows_with_route l
+          FROM latest_rows_limited l
           ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""}
         `
       )
-      .all(...params);
+      .all(...scrapeLimitParams, ...pickupLimitParams, ...params);
     res.json(normalizeVehicleRows(rows));
   } catch (err) {
     console.error("LATEST PRICES ERROR:", err);
@@ -360,6 +460,8 @@ app.get("/api/trends", async (req, res) => {
     const db = getDb();
     const { conditions, params } = buildRouteFilters(req.query);
     const allowedFilters = ["vehicle", "location"];
+    const maxScrapeDates = parsePositiveInt(req.query.max_scrape_dates, { max: 365 });
+    const maxPickupDates = parsePositiveInt(req.query.max_pickup_dates, { max: 730 });
 
     for (const key of allowedFilters) {
       const value = req.query[key];
@@ -370,6 +472,35 @@ app.get("/api/trends", async (req, res) => {
     }
 
     const query = `
+        WITH scoped AS (
+          SELECT
+            p.*,
+            ${NORMALIZED_SCRAPE_DATE_SQL} AS scrape_date_key
+          FROM pricing_data p
+          ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""}
+        ),
+        limited AS (
+          SELECT *
+          FROM scoped s
+          WHERE 1=1
+          ${maxScrapeDates ? `
+            AND s.scrape_date_key IN (
+              SELECT scrape_date_key
+              FROM scoped
+              WHERE scrape_date_key IS NOT NULL
+              GROUP BY scrape_date_key
+              ORDER BY scrape_date_key DESC
+              LIMIT ?
+            )` : ""}
+          ${maxPickupDates ? `
+            AND s.pickup_date IN (
+              SELECT pickup_date
+              FROM scoped
+              GROUP BY pickup_date
+              ORDER BY pickup_date DESC
+              LIMIT ?
+            )` : ""}
+        )
         SELECT
           pickup_date,
           dropoff_date,
@@ -383,12 +514,17 @@ app.get("/api/trends", async (req, res) => {
           ${DAILY_RATE_SQL} AS daily_rate,
           scrape_date,
           type
-        FROM pricing_data
-        ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""}
+        FROM limited
         ;
       `;
-
-    const rows = db.prepare(query).all(...params);
+    const limitParams = [];
+    if (maxScrapeDates) {
+      limitParams.push(maxScrapeDates);
+    }
+    if (maxPickupDates) {
+      limitParams.push(maxPickupDates);
+    }
+    const rows = db.prepare(query).all(...params, ...limitParams);
     res.json(normalizeVehicleRows(rows));
   } catch (err) {
     console.error("TRENDS ERROR:", err);

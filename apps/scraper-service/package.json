@@ -7,6 +7,7 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsx watch src/server.ts",
     "start": "node dist/server.js",
+    "start:railway": "npx playwright install chromium && node dist/server.js",
     "lint": "tsc --noEmit -p tsconfig.json",
     "test": "node --test --import tsx --test-reporter=spec src/**/*.test.ts"
   },

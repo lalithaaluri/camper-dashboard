@@ -2223,12 +2223,13 @@ function DashboardApp() {
   useEffect(() => {
     let cancelled = false;
     let activeController = null;
+    let timerId = null;
 
     setLoading(true);
     setLoadError("");
     const loadData = async () => {
       const controller = new AbortController();
-      const timeoutId = window.setTimeout(() => controller.abort(), 30000);
+      const timeoutId = window.setTimeout(() => controller.abort(), 120000);
       activeController = controller;
 
       try {
@@ -2242,9 +2243,12 @@ function DashboardApp() {
           // "Same as Pick Up" is the default dropoff behavior.
           queryParams.set("dropoff_location", appliedPickupLocation);
         }
+        // Keep payloads bounded so seeded historical datasets stay responsive.
+        queryParams.set("max_scrape_dates", "45");
+        queryParams.set("max_pickup_dates", "180");
         const query = queryParams.toString() ? `?${queryParams.toString()}` : "";
         const pricesUrl = `${PRICING_API_BASE}/api/prices/latest${query}`;
-        const trendsUrl = `${PRICING_API_BASE}/api/prices${query}`;
+        const trendsUrl = `${PRICING_API_BASE}/api/trends${query}`;
         console.log("[DASHBOARD][API] Fetching price endpoints", { pricesUrl, trendsUrl });
 
         const [pricesResponse, trendsResponse] = await Promise.all([
@@ -2343,15 +2347,23 @@ function DashboardApp() {
       }
     };
 
-    loadData();
-    const timer = window.setInterval(loadData, 15000);
+    const runAndSchedule = async () => {
+      await loadData();
+      if (cancelled) {
+        return;
+      }
+      timerId = window.setTimeout(runAndSchedule, 60000);
+    };
+    void runAndSchedule();
 
     return () => {
       cancelled = true;
       if (activeController) {
         activeController.abort();
       }
-      window.clearInterval(timer);
+      if (timerId) {
+        window.clearTimeout(timerId);
+      }
     };
   }, [dataReloadTrigger, appliedPickupLocation, appliedDropoffLocation]);
 
@@ -2381,12 +2393,16 @@ function DashboardApp() {
 
       try {
         const scraperHealthUrl = `${SCRAPER_API_BASE}/api/health`;
-        const datasetUrl = `${PRICING_API_BASE}/api/prices`;
+        const statsUrl = `${PRICING_API_BASE}/api/stats`;
         console.log("[DASHBOARD][HEALTH] health check start", { scraperHealthUrl });
 
-        const response = await fetch(scraperHealthUrl, { cache: "no-store" });
+        const [response, statsResponse] = await Promise.all([
+          fetch(scraperHealthUrl, { cache: "no-store" }),
+          fetch(statsUrl, { cache: "no-store" })
+        ]);
         console.log("[DASHBOARD][HEALTH] response status", {
-          scraperHealthStatus: response.status
+          scraperHealthStatus: response.status,
+          apiStatsStatus: statsResponse.status
         });
 
         if (!response.ok) {
@@ -2394,28 +2410,15 @@ function DashboardApp() {
         }
 
         console.log("[DASHBOARD][HEALTH] health check success");
-        let apiRows = [];
-
-        try {
-          const datasetResponse = await fetch(datasetUrl, { cache: "no-store" });
-          if (datasetResponse.ok) {
-            const parsedRows = await datasetResponse.json();
-            apiRows = Array.isArray(parsedRows) ? parsedRows : [];
-          } else {
-            console.warn("[DASHBOARD][HEALTH] Dataset fetch failed", {
-              status: datasetResponse.status
-            });
-          }
-        } catch (datasetError) {
-          console.warn("[DASHBOARD][HEALTH] Dataset fetch error", datasetError);
-        }
-
         const payload = await response.json();
-        const apiRowCount = apiRows.length;
+        const statsPayload = statsResponse.ok ? await statsResponse.json() : {};
+        const apiRowCount = Number(statsPayload?.row_count || 0);
         console.log("[DASHBOARD][HEALTH] Parsed payload", {
           scraperOk: payload?.ok,
           payloadDatasetRowCount: payload?.dataset?.rowCount ?? null,
-          apiDatasetRowCount: apiRowCount
+          apiDatasetRowCount: apiRowCount,
+          apiLatestPickupDate: statsPayload?.latest_pickup_date ?? null,
+          apiLatestScrapeDate: statsPayload?.latest_scrape_date ?? null
         });
         if (!cancelled) {
           setApiDatasetRowCount(apiRowCount);
@@ -2426,7 +2429,15 @@ function DashboardApp() {
             dataset: {
               ...initialScraperStatus.dataset,
               ...(payload?.dataset || {}),
-              rowCount: apiRowCount || payload?.dataset?.rowCount || 0
+              rowCount: apiRowCount || payload?.dataset?.rowCount || 0,
+              latestPickupDate:
+                statsPayload?.latest_pickup_date ||
+                payload?.dataset?.latestPickupDate ||
+                null,
+              latestScrapeDate:
+                statsPayload?.latest_scrape_date ||
+                payload?.dataset?.latestScrapeDate ||
+                null
             },
             error: ""
           }));
