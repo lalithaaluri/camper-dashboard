@@ -1,5 +1,6 @@
 const express = require("express");
 const cors = require("cors");
+const crypto = require("crypto");
 const { getDb } = require("./db");
 
 process.on("uncaughtException", (err) => {
@@ -18,6 +19,17 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
   .split(",")
   .map((value) => value.trim())
   .filter(Boolean);
+const dashboardAuthUser = (process.env.DASHBOARD_AUTH_USER || "").trim();
+const dashboardAuthPassword = (process.env.DASHBOARD_AUTH_PASSWORD || "").trim();
+const dashboardAuthPasswordHash = (process.env.DASHBOARD_AUTH_PASSWORD_HASH || "").trim();
+const dashboardSessionSecret = (process.env.DASHBOARD_SESSION_SECRET || "").trim();
+const DASHBOARD_SESSION_COOKIE = "camper_dashboard_session";
+const SCRYPT_HASH_PREFIX = "scrypt$";
+const LOGIN_RATE_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_RATE_MAX_ATTEMPTS = 10;
+const LOGIN_RATE_BLOCK_MS = 15 * 60 * 1000;
+const loginStateByIp = new Map();
+const sessionsById = new Map();
 
 const buildNormalizedDateSql = (columnExpression) => `
   CASE
@@ -57,6 +69,203 @@ const parsePositiveInt = (value, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}
     return null;
   }
   return Math.min(parsed, max);
+};
+
+const dashboardSessionTtlHours =
+  parsePositiveInt(process.env.DASHBOARD_SESSION_TTL_HOURS, { min: 1, max: 168 }) || 24;
+const dashboardSessionTtlMs = dashboardSessionTtlHours * 60 * 60 * 1000;
+const dashboardAuthEnabled = Boolean(
+  dashboardAuthUser && (dashboardAuthPassword || dashboardAuthPasswordHash) && dashboardSessionSecret
+);
+
+const parseCookieHeader = (cookieHeader) => {
+  const values = {};
+
+  String(cookieHeader || "")
+    .split(";")
+    .map((chunk) => chunk.trim())
+    .filter(Boolean)
+    .forEach((entry) => {
+      const separatorIndex = entry.indexOf("=");
+      if (separatorIndex <= 0) {
+        return;
+      }
+
+      const key = entry.slice(0, separatorIndex).trim();
+      const rawValue = entry.slice(separatorIndex + 1).trim();
+      try {
+        values[key] = decodeURIComponent(rawValue);
+      } catch {
+        values[key] = rawValue;
+      }
+    });
+
+  return values;
+};
+
+const safeCompare = (left, right) => {
+  const leftBuffer = Buffer.from(String(left || ""), "utf8");
+  const rightBuffer = Buffer.from(String(right || ""), "utf8");
+  if (leftBuffer.length !== rightBuffer.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(leftBuffer, rightBuffer);
+};
+
+const hashWithScrypt = (password, salt) =>
+  crypto.scryptSync(password, salt, 64).toString("hex");
+
+const verifyPasswordHash = (password, encodedHash) => {
+  const value = String(encodedHash || "");
+  if (!value.startsWith(SCRYPT_HASH_PREFIX)) {
+    return false;
+  }
+
+  const parts = value.split("$");
+  if (parts.length !== 3) {
+    return false;
+  }
+
+  const salt = parts[1];
+  const expected = parts[2];
+  if (!salt || !expected) {
+    return false;
+  }
+
+  const actual = hashWithScrypt(password, salt);
+  return safeCompare(actual, expected);
+};
+
+const verifyDashboardPassword = (password) => {
+  const submittedPassword = String(password || "");
+
+  if (dashboardAuthPasswordHash) {
+    return verifyPasswordHash(submittedPassword, dashboardAuthPasswordHash);
+  }
+
+  if (!dashboardAuthPassword) {
+    return false;
+  }
+
+  return safeCompare(submittedPassword, dashboardAuthPassword);
+};
+
+const getSecureRequest = (request) => {
+  const forwardedProto = String(request.get("x-forwarded-proto") || "")
+    .split(",")[0]
+    .trim()
+    .toLowerCase();
+  return request.secure || forwardedProto === "https";
+};
+
+const buildSessionCookieOptions = (request) => {
+  const secureRequest = getSecureRequest(request);
+  return {
+    httpOnly: true,
+    secure: secureRequest,
+    sameSite: secureRequest ? "none" : "lax",
+    path: "/",
+    maxAge: dashboardSessionTtlMs
+  };
+};
+
+const signSessionId = (sessionId) =>
+  crypto
+    .createHmac("sha256", dashboardSessionSecret)
+    .update(sessionId)
+    .digest("base64url");
+
+const encodeSessionCookie = (sessionId) => `${sessionId}.${signSessionId(sessionId)}`;
+
+const decodeSessionCookie = (cookieValue) => {
+  if (!cookieValue) {
+    return null;
+  }
+
+  const trimmed = String(cookieValue).trim();
+  const separatorIndex = trimmed.lastIndexOf(".");
+  if (separatorIndex <= 0) {
+    return null;
+  }
+
+  const sessionId = trimmed.slice(0, separatorIndex);
+  const signature = trimmed.slice(separatorIndex + 1);
+  if (!sessionId || !signature) {
+    return null;
+  }
+
+  const expectedSignature = signSessionId(sessionId);
+  if (!safeCompare(expectedSignature, signature)) {
+    return null;
+  }
+
+  return sessionId;
+};
+
+const pruneExpiredSessions = () => {
+  const now = Date.now();
+  for (const [sessionId, session] of sessionsById.entries()) {
+    if (!session || session.expiresAt <= now) {
+      sessionsById.delete(sessionId);
+    }
+  }
+};
+
+const resolveSession = (request) => {
+  if (!dashboardAuthEnabled) {
+    return null;
+  }
+
+  pruneExpiredSessions();
+  const cookies = parseCookieHeader(request.headers.cookie);
+  const signedCookieValue = cookies[DASHBOARD_SESSION_COOKIE];
+  const sessionId = decodeSessionCookie(signedCookieValue);
+  if (!sessionId) {
+    return null;
+  }
+
+  const session = sessionsById.get(sessionId);
+  if (!session || session.expiresAt <= Date.now()) {
+    sessionsById.delete(sessionId);
+    return null;
+  }
+
+  return {
+    sessionId,
+    ...session
+  };
+};
+
+const getClientIp = (request) => {
+  const forwardedFor = String(request.get("x-forwarded-for") || "")
+    .split(",")[0]
+    .trim();
+  return forwardedFor || request.ip || "unknown";
+};
+
+const getLoginState = (ip) => {
+  const now = Date.now();
+  const current = loginStateByIp.get(ip);
+
+  if (!current || now - current.windowStart > LOGIN_RATE_WINDOW_MS) {
+    const fresh = { windowStart: now, attempts: 0, blockedUntil: 0 };
+    loginStateByIp.set(ip, fresh);
+    return fresh;
+  }
+
+  return current;
+};
+
+const markFailedLogin = (ip) => {
+  const state = getLoginState(ip);
+  state.attempts += 1;
+  if (state.attempts >= LOGIN_RATE_MAX_ATTEMPTS) {
+    state.blockedUntil = Date.now() + LOGIN_RATE_BLOCK_MS;
+  }
+};
+
+const clearFailedLogins = (ip) => {
+  loginStateByIp.delete(ip);
 };
 
 function normalizeVehicle(vehicle) {
@@ -112,18 +321,20 @@ function buildRouteFilters(query) {
 const isAllowedOrigin = (origin) =>
   allowedOrigins.length === 0 || allowedOrigins.includes(origin);
 
-app.use(
-  cors({
-    origin(origin, callback) {
-      if (!origin || isAllowedOrigin(origin)) {
-        callback(null, true);
-        return;
-      }
-      callback(new Error("CORS origin not allowed"));
+const corsOptions = {
+  credentials: true,
+  origin(origin, callback) {
+    if (!origin || isAllowedOrigin(origin)) {
+      callback(null, true);
+      return;
     }
-  })
-);
-app.options(/.*/, cors());
+    callback(new Error("CORS origin not allowed"));
+  }
+};
+
+app.set("trust proxy", 1);
+app.use(cors(corsOptions));
+app.options(/.*/, cors(corsOptions));
 app.use(express.json());
 
 const insertPricingRows = (rows) => {
@@ -195,6 +406,127 @@ const requireInternalIngestToken = (req, res, next) => {
   return next();
 };
 
+const clearDashboardSessionCookie = (request, response) => {
+  const options = buildSessionCookieOptions(request);
+  response.clearCookie(DASHBOARD_SESSION_COOKIE, {
+    httpOnly: true,
+    secure: options.secure,
+    sameSite: options.sameSite,
+    path: "/"
+  });
+};
+
+const requireDashboardSession = (req, res, next) => {
+  if (!dashboardAuthEnabled) {
+    return next();
+  }
+
+  const session = resolveSession(req);
+  if (!session) {
+    return res.status(401).json({ error: "Authentication required" });
+  }
+
+  req.dashboardUser = session.user;
+  return next();
+};
+
+app.get("/api/auth/config", (_req, res) => {
+  res.json({
+    authEnabled: dashboardAuthEnabled,
+    usernameHint: dashboardAuthEnabled ? dashboardAuthUser : null,
+    sessionTtlHours: dashboardAuthEnabled ? dashboardSessionTtlHours : null
+  });
+});
+
+app.get("/api/auth/session", (req, res) => {
+  if (!dashboardAuthEnabled) {
+    res.json({
+      authenticated: true,
+      authEnabled: false,
+      usernameHint: null
+    });
+    return;
+  }
+
+  const session = resolveSession(req);
+  if (!session) {
+    res.status(401).json({
+      authenticated: false,
+      authEnabled: true,
+      usernameHint: dashboardAuthUser
+    });
+    return;
+  }
+
+  res.json({
+    authenticated: true,
+    authEnabled: true,
+    usernameHint: dashboardAuthUser,
+    user: session.user
+  });
+});
+
+app.post("/api/auth/login", (req, res) => {
+  if (!dashboardAuthEnabled) {
+    res.json({ ok: true, authEnabled: false });
+    return;
+  }
+
+  const ip = getClientIp(req);
+  const rateState = getLoginState(ip);
+  if (rateState.blockedUntil > Date.now()) {
+    const retryAfterSeconds = Math.ceil((rateState.blockedUntil - Date.now()) / 1000);
+    res
+      .status(429)
+      .set("Retry-After", String(retryAfterSeconds))
+      .json({ error: "Too many login attempts. Please try again later." });
+    return;
+  }
+
+  const submittedUser = String(req.body?.username || "").trim();
+  const submittedPassword = String(req.body?.password || "");
+  const userMatches = safeCompare(submittedUser, dashboardAuthUser);
+  const passwordMatches = verifyDashboardPassword(submittedPassword);
+
+  if (!userMatches || !passwordMatches) {
+    markFailedLogin(ip);
+    res.status(401).json({ error: "Invalid username or password" });
+    return;
+  }
+
+  clearFailedLogins(ip);
+
+  const sessionId = crypto.randomBytes(32).toString("base64url");
+  const expiresAt = Date.now() + dashboardSessionTtlMs;
+  sessionsById.set(sessionId, {
+    user: dashboardAuthUser,
+    expiresAt
+  });
+
+  res.cookie(
+    DASHBOARD_SESSION_COOKIE,
+    encodeSessionCookie(sessionId),
+    buildSessionCookieOptions(req)
+  );
+  res.json({
+    ok: true,
+    user: dashboardAuthUser,
+    expiresAt: new Date(expiresAt).toISOString()
+  });
+});
+
+app.post("/api/auth/logout", (req, res) => {
+  const cookies = parseCookieHeader(req.headers.cookie);
+  const signedCookieValue = cookies[DASHBOARD_SESSION_COOKIE];
+  const sessionId = decodeSessionCookie(signedCookieValue);
+  if (sessionId) {
+    sessionsById.delete(sessionId);
+  }
+
+  clearDashboardSessionCookie(req, res);
+  res.json({ ok: true });
+});
+
 app.get("/api/health", (req, res) => {
   try {
     console.log("API HIT: /api/health");
@@ -222,7 +554,7 @@ app.post("/api/internal/ingest-rows", requireInternalIngestToken, (req, res) => 
   }
 });
 
-app.get("/api/latest-scrape-date", (req, res) => {
+app.get("/api/latest-scrape-date", requireDashboardSession, (req, res) => {
   try {
     console.log("API HIT: /api/latest-scrape-date");
     const db = getDb();
@@ -245,7 +577,7 @@ app.get("/api/latest-scrape-date", (req, res) => {
   }
 });
 
-app.get("/api/stats", (req, res) => {
+app.get("/api/stats", requireDashboardSession, (req, res) => {
   try {
     const db = getDb();
     const stats = db
@@ -271,7 +603,7 @@ app.get("/api/stats", (req, res) => {
   }
 });
 
-app.get("/api/prices", (req, res) => {
+app.get("/api/prices", requireDashboardSession, (req, res) => {
   try {
     console.log("API HIT: /api/prices");
     const db = getDb();
@@ -345,7 +677,7 @@ app.get("/api/prices", (req, res) => {
   }
 });
 
-app.get("/api/prices/latest", (req, res) => {
+app.get("/api/prices/latest", requireDashboardSession, (req, res) => {
   try {
     console.log("API HIT: /api/prices/latest");
     const db = getDb();
@@ -462,7 +794,7 @@ app.get("/api/prices/latest", (req, res) => {
   }
 });
 
-app.get("/api/trends", async (req, res) => {
+app.get("/api/trends", requireDashboardSession, async (req, res) => {
   try {
     console.log("API HIT: /api/trends");
     const db = getDb();

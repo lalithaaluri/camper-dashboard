@@ -8,9 +8,7 @@
 
 ### Important
 - `Netlify Password Protection` is not available on Netlify Free for production deploys.
-- If you must stay free, use:
-  - strong random URLs during setup, and
-  - API/scraper token protection (already added for ingest path).
+- This setup now supports backend session login via API cookies (recommended).
 
 ## 1) Deploy API (Railway)
 
@@ -24,10 +22,18 @@
    - `PORT=4302` (optional; Railway usually injects `PORT`)
    - `INTERNAL_INGEST_TOKEN=<long-random-token>`
    - `PRICING_DB_PATH=/app/data/pricing.db`
-5. Attach a Railway Volume to the API service:
+   - `ALLOWED_ORIGINS=<dashboard URL>` (example: `https://campervan-dashboard.netlify.app`)
+   - `DASHBOARD_AUTH_USER=<login username>`
+   - `DASHBOARD_AUTH_PASSWORD_HASH=<scrypt hash>`
+   - `DASHBOARD_SESSION_SECRET=<long-random-secret>`
+   - `DASHBOARD_SESSION_TTL_HOURS=24` (optional)
+5. Generate auth values locally:
+   - `node tools/generate-dashboard-auth.mjs "<your-password>"`
+   - Copy output into Railway variables.
+6. Attach a Railway Volume to the API service:
    - Mount Path: `/app/data`
    - Do not mount to `/app` (that can hide app files).
-6. Deploy and copy API public URL, for example:
+7. Deploy and copy API public URL, for example:
    - `https://api-production-xxxx.up.railway.app`
 
 ## 2) Deploy Scraper (Railway)
@@ -56,6 +62,7 @@
 4. Environment variables:
    - `REACT_APP_PRICING_API_URL=<API URL>`
    - `REACT_APP_SCRAPER_API_URL=<Scraper URL>`
+   - Do not put login username/password in `REACT_APP_*`.
 5. Deploy and copy dashboard URL:
    - `https://<site-name>.netlify.app`
 

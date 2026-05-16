@@ -18,9 +18,6 @@ const SCRAPER_API_BASE =
 const PRICING_API_BASE =
   process.env.REACT_APP_PRICING_API_URL || `http://${browserHost}:4302`;
 const SCRAPER_TRIGGER_TOKEN = process.env.REACT_APP_SCRAPER_TRIGGER_TOKEN || "";
-const DASHBOARD_LOGIN_USER = process.env.REACT_APP_DASHBOARD_LOGIN_USER || "";
-const DASHBOARD_LOGIN_PASS = process.env.REACT_APP_DASHBOARD_LOGIN_PASS || "";
-const DASHBOARD_AUTH_STORAGE_KEY = "camper_dashboard_login_v1";
 
 const vehicleConfigs = {
   "trek budget": {
@@ -2281,7 +2278,10 @@ function DashboardApp() {
         const trendsUrl = `${PRICING_API_BASE}/api/trends${trendsQuery}`;
         console.log("[DASHBOARD][API] Fetching price endpoints", { pricesUrl, trendsUrl });
 
-        const pricesResponse = await fetch(pricesUrl, { signal: controller.signal });
+        const pricesResponse = await fetch(pricesUrl, {
+          signal: controller.signal,
+          credentials: "include"
+        });
         console.log("[DASHBOARD][API] Responses", {
           pricesStatus: pricesResponse.status
         });
@@ -2350,7 +2350,10 @@ function DashboardApp() {
 
         // Trend data is secondary; load it in background so initial render stays reliable.
         try {
-          const trendsResponse = await fetch(trendsUrl, { signal: controller.signal });
+          const trendsResponse = await fetch(trendsUrl, {
+            signal: controller.signal,
+            credentials: "include"
+          });
           if (trendsResponse.ok) {
             const trendsApiRows = await trendsResponse.json();
             if (!cancelled) {
@@ -2438,7 +2441,10 @@ function DashboardApp() {
 
         const [response, statsResponse] = await Promise.all([
           fetch(scraperHealthUrl, { cache: "no-store" }),
-          fetch(statsUrl, { cache: "no-store" })
+          fetch(statsUrl, {
+            cache: "no-store",
+            credentials: "include"
+          })
         ]);
         console.log("[DASHBOARD][HEALTH] response status", {
           scraperHealthStatus: response.status,
@@ -4192,40 +4198,116 @@ function DashboardApp() {
 }
 
 function App() {
-  const loginEnabled = Boolean(DASHBOARD_LOGIN_USER && DASHBOARD_LOGIN_PASS);
-  const authMarker = `${DASHBOARD_LOGIN_USER}:${DASHBOARD_LOGIN_PASS}`;
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [usernameHint, setUsernameHint] = useState("");
   const [loginError, setLoginError] = useState("");
-  const [isAuthenticated, setIsAuthenticated] = useState(() => {
-    if (!loginEnabled || typeof window === "undefined") {
-      return true;
-    }
-    return window.localStorage.getItem(DASHBOARD_AUTH_STORAGE_KEY) === authMarker;
-  });
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [authEnabled, setAuthEnabled] = useState(false);
+  const [authResolved, setAuthResolved] = useState(false);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
 
-  const handleLoginSubmit = (event) => {
+  useEffect(() => {
+    let cancelled = false;
+
+    const resolveAuth = async () => {
+      setAuthLoading(true);
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), 8000);
+
+      try {
+        const sessionResponse = await fetch(`${PRICING_API_BASE}/api/auth/session`, {
+          credentials: "include",
+          cache: "no-store",
+          signal: controller.signal
+        });
+        const sessionPayload = await sessionResponse.json().catch(() => ({}));
+        if (cancelled) {
+          return;
+        }
+
+        const enabled = Boolean(sessionPayload?.authEnabled);
+        setAuthEnabled(enabled);
+        setUsernameHint(enabled ? String(sessionPayload?.usernameHint || "") : "");
+        setLoginError("");
+        setIsAuthenticated(!enabled || Boolean(sessionPayload?.authenticated));
+      } catch (error) {
+        if (!cancelled) {
+          setAuthEnabled(true);
+          setIsAuthenticated(false);
+          setLoginError(
+            error instanceof DOMException && error.name === "AbortError"
+              ? "Sign-in check timed out. Please refresh once."
+              : error instanceof Error
+              ? error.message
+              : "Unable to reach authentication service"
+          );
+        }
+      } finally {
+        window.clearTimeout(timeoutId);
+        if (!cancelled) {
+          setAuthResolved(true);
+          setAuthLoading(false);
+        }
+      }
+    };
+
+    void resolveAuth();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleLoginSubmit = async (event) => {
     event.preventDefault();
-    const userOk = username.trim() === DASHBOARD_LOGIN_USER;
-    const passOk = password === DASHBOARD_LOGIN_PASS;
+    setIsSubmitting(true);
 
-    if (!userOk || !passOk) {
-      setLoginError("Invalid username or password");
-      return;
+    try {
+      const response = await fetch(`${PRICING_API_BASE}/api/auth/login`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        credentials: "include",
+        body: JSON.stringify({
+          username: username.trim(),
+          password
+        })
+      });
+
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload.error || "Invalid username or password");
+      }
+
+      setIsAuthenticated(true);
+      setLoginError("");
+      setPassword("");
+    } catch (error) {
+      setLoginError(error instanceof Error ? error.message : "Login failed");
+    } finally {
+      setIsSubmitting(false);
     }
-
-    window.localStorage.setItem(DASHBOARD_AUTH_STORAGE_KEY, authMarker);
-    setIsAuthenticated(true);
-    setLoginError("");
-    setPassword("");
   };
 
-  const handleSignOut = () => {
-    window.localStorage.removeItem(DASHBOARD_AUTH_STORAGE_KEY);
+  const handleSignOut = async () => {
+    try {
+      await fetch(`${PRICING_API_BASE}/api/auth/logout`, {
+        method: "POST",
+        credentials: "include"
+      });
+    } catch {
+      // no-op
+    }
     setIsAuthenticated(false);
   };
 
-  if (!loginEnabled) {
+  if (!authResolved || authLoading) {
+    return <div style={{ padding: "20px" }}>Loading sign-in...</div>;
+  }
+
+  if (!authEnabled) {
     return <DashboardApp />;
   }
 
@@ -4263,6 +4345,7 @@ function App() {
               type="text"
               value={username}
               onChange={(event) => setUsername(event.target.value)}
+              placeholder={usernameHint || "Enter username"}
               autoComplete="username"
               required
               style={{
@@ -4297,6 +4380,7 @@ function App() {
 
           <button
             type="submit"
+            disabled={isSubmitting}
             style={{
               width: "100%",
               border: "none",
@@ -4305,10 +4389,11 @@ function App() {
               background: "#1f5a3a",
               color: "#fff",
               fontWeight: 700,
-              cursor: "pointer"
+              cursor: isSubmitting ? "not-allowed" : "pointer",
+              opacity: isSubmitting ? 0.7 : 1
             }}
           >
-            Sign in
+            {isSubmitting ? "Signing in..." : "Sign in"}
           </button>
         </form>
       </div>

@@ -50,3 +50,20 @@ dataset back to:
 The dashboard reads its CSV from `apps/dashboard/public/dataset_FINAL_SAFE.csv`
 and calls the scraper service through `REACT_APP_SCRAPER_API_URL`. If that
 environment variable is not set, it defaults to `http://localhost:4301`.
+
+## Optional secure dashboard login (recommended for hosted)
+
+Dashboard auth is handled by the API service (not the frontend bundle).
+
+Set these API environment variables:
+
+- `DASHBOARD_AUTH_USER=<username>`
+- `DASHBOARD_AUTH_PASSWORD_HASH=<scrypt hash>`
+- `DASHBOARD_SESSION_SECRET=<random secret>`
+- `ALLOWED_ORIGINS=<dashboard URL>`
+
+Generate hash + session secret:
+
+```bash
+node tools/generate-dashboard-auth.mjs "<password>"
+```
