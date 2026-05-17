@@ -663,18 +663,22 @@ const collectCurrentPageRows = async (
     if (websiteDailyRate) {
       const tripDays = getTripDays(pickupDate, dropoffDate);
       const ratio = price / websiteDailyRate;
+      const isCrossLocation = pickupDepot !== dropoffDepot;
+      const maxAllowedRatio = isCrossLocation ? tripDays + 10 : tripDays + 4;
       // Guardrail: reject clearly cross-card or malformed totals.
-      // Real-world ratios may vary due fees/promos, so keep the bounds wide.
-      if (ratio < 0.5 || ratio > tripDays + 4) {
+      // Cross-location trips can include one-way fees, so allow a wider bound there.
+      if (ratio < 0.5 || ratio > maxAllowedRatio) {
         console.warn("[SCRAPER] Skipping suspicious price pair:", {
           company: match.company,
           vehicle: match.vehicle,
           pickupDate,
           dropoffDate,
           tripDays,
+          isCrossLocation,
           price,
           websiteDailyRate,
-          ratio
+          ratio,
+          maxAllowedRatio
         });
         continue;
       }
