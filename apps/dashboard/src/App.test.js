@@ -134,6 +134,34 @@ beforeEach(() => {
       };
     }
 
+    if (url.includes("/api/trends")) {
+      return {
+        ok: true,
+        json: async () => [
+          {
+            pickup_date: "2026-04-01",
+            dropoff_date: "2026-04-02",
+            location: "auckland",
+            company: "elementsworld",
+            vehicle: "trek large",
+            price: 320,
+            scrape_date: "2026-04-18",
+            type: "elements"
+          },
+          {
+            pickup_date: "2026-04-01",
+            dropoff_date: "2026-04-02",
+            location: "auckland",
+            company: "campervanvillage",
+            vehicle: "aventus2",
+            price: 295,
+            scrape_date: "2026-04-18",
+            type: "competitor"
+          }
+        ]
+      };
+    }
+
     if (url.includes("/api/prices")) {
       return {
         ok: true,
@@ -200,7 +228,7 @@ test("renders camper revenue dashboard", async () => {
       const requestUrl = String(url);
       return (
         requestUrl ===
-          "http://localhost:4302/api/prices/latest?max_pickup_dates=90" &&
+          "http://localhost:4302/api/trends" &&
         options &&
         options.signal instanceof AbortSignal
       );

@@ -100,7 +100,6 @@ const scrapeRouteOptions = [
 ];
 
 const OVERVIEW_MAX_PICKUP_DATES = 14;
-const TREND_MAX_PICKUP_DATES = 90;
 
 const initialDashboard = {
   summary: {
@@ -2276,13 +2275,8 @@ function DashboardApp() {
         queryParams.set("max_pickup_dates", String(OVERVIEW_MAX_PICKUP_DATES));
         const query = queryParams.toString() ? `?${queryParams.toString()}` : "";
         const pricesUrl = `${PRICING_API_BASE}/api/prices/latest${query}`;
-        const trendsQueryParams = new URLSearchParams();
-        // Trend view should be global (not route-filtered) with rolling 3-month history.
-        trendsQueryParams.set("max_pickup_dates", String(TREND_MAX_PICKUP_DATES));
-        const trendsQuery = trendsQueryParams.toString()
-          ? `?${trendsQueryParams.toString()}`
-          : "";
-        const trendsUrl = `${PRICING_API_BASE}/api/prices/latest${trendsQuery}`;
+        // Trend view should include the full dataset available in the database.
+        const trendsUrl = `${PRICING_API_BASE}/api/trends`;
         console.log("[DASHBOARD][API] Fetching price endpoints", { pricesUrl, trendsUrl });
 
         const pricesResponse = await fetch(pricesUrl, {
