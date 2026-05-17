@@ -200,7 +200,7 @@ test("renders camper revenue dashboard", async () => {
       const requestUrl = String(url);
       return (
         requestUrl ===
-          "http://localhost:4302/api/prices/latest?pickup_location=auckland&dropoff_location=auckland&max_pickup_dates=120" &&
+          "http://localhost:4302/api/prices/latest?pickup_location=auckland&dropoff_location=auckland&max_pickup_dates=90" &&
         options &&
         options.signal instanceof AbortSignal
       );

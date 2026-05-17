@@ -100,7 +100,7 @@ const scrapeRouteOptions = [
 ];
 
 const OVERVIEW_MAX_PICKUP_DATES = 14;
-const TREND_MAX_PICKUP_DATES = 120;
+const TREND_MAX_PICKUP_DATES = 90;
 
 const initialDashboard = {
   summary: {
@@ -2277,7 +2277,7 @@ function DashboardApp() {
         const query = queryParams.toString() ? `?${queryParams.toString()}` : "";
         const pricesUrl = `${PRICING_API_BASE}/api/prices/latest${query}`;
         const trendsQueryParams = new URLSearchParams(queryParams);
-        // Trend dataset can be larger than overview, but still needs a safe ceiling in browser.
+        // Trend view should show a rolling 3-month history while staying responsive.
         trendsQueryParams.set("max_pickup_dates", String(TREND_MAX_PICKUP_DATES));
         const trendsQuery = trendsQueryParams.toString()
           ? `?${trendsQueryParams.toString()}`
