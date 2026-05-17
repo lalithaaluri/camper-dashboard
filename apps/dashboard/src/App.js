@@ -2196,6 +2196,9 @@ function DashboardApp() {
     const nextPickupLocation = event.target.value;
     setPendingPickupLocation(nextPickupLocation);
     setPendingDropoffLocation("");
+    // Apply immediately so same-location route changes update trends without requiring a dropoff click.
+    setAppliedPickupLocation(nextPickupLocation || "");
+    setAppliedDropoffLocation("");
   };
   const handleDropoffLocationChange = (event) => {
     const nextDropoffLocation = event.target.value;
@@ -2275,8 +2278,19 @@ function DashboardApp() {
         queryParams.set("max_pickup_dates", String(OVERVIEW_MAX_PICKUP_DATES));
         const query = queryParams.toString() ? `?${queryParams.toString()}` : "";
         const pricesUrl = `${PRICING_API_BASE}/api/prices/latest${query}`;
-        // Trend view should include the full dataset available in the database.
-        const trendsUrl = `${PRICING_API_BASE}/api/trends`;
+        const trendQueryParams = new URLSearchParams();
+        if (appliedPickupLocation) {
+          trendQueryParams.set("pickup_location", appliedPickupLocation);
+        }
+        if (appliedDropoffLocation) {
+          trendQueryParams.set("dropoff_location", appliedDropoffLocation);
+        } else if (appliedPickupLocation) {
+          trendQueryParams.set("dropoff_location", appliedPickupLocation);
+        }
+        const trendsQuery = trendQueryParams.toString()
+          ? `?${trendQueryParams.toString()}`
+          : "";
+        const trendsUrl = `${PRICING_API_BASE}/api/trends${trendsQuery}`;
         console.log("[DASHBOARD][API] Fetching price endpoints", { pricesUrl, trendsUrl });
 
         const pricesResponse = await fetch(pricesUrl, {
@@ -2606,7 +2620,9 @@ function DashboardApp() {
         config,
         adjustment,
         selectedDate: "",
-        selectedVehicle: vehicle
+        selectedVehicle: vehicle,
+        selectedPickupLocation: appliedPickupLocation,
+        selectedDropoffLocation: appliedDropoffLocation || appliedPickupLocation
       })
     );
   }, [

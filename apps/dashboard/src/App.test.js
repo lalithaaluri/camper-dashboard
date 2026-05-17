@@ -226,9 +226,9 @@ test("renders camper revenue dashboard", async () => {
   expect(
     global.fetch.mock.calls.some(([url, options]) => {
       const requestUrl = String(url);
-      return (
-        requestUrl ===
-          "http://localhost:4302/api/trends" &&
+        return (
+          requestUrl ===
+          "http://localhost:4302/api/trends?pickup_location=auckland&dropoff_location=auckland" &&
         options &&
         options.signal instanceof AbortSignal
       );
