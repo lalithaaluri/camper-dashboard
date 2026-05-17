@@ -99,6 +99,9 @@ const scrapeRouteOptions = [
   }
 ];
 
+const OVERVIEW_MAX_PICKUP_DATES = 14;
+const TREND_MAX_PICKUP_DATES = 120;
+
 const initialDashboard = {
   summary: {
     lowest: null,
@@ -1025,7 +1028,9 @@ export const filterExactTripRows = ({
   selectedPickup = "",
   selectedDropoff = "",
   selectedVehicle = "",
-  selectedLocation = ""
+  selectedLocation = "",
+  selectedPickupLocation = "",
+  selectedDropoffLocation = ""
 }) =>
   rows.filter(
     (row) =>
@@ -1033,7 +1038,11 @@ export const filterExactTripRows = ({
       (!selectedDropoff || row.dropoffDateKey === selectedDropoff) &&
       (!selectedVehicle ||
         normalizeVehicleKey(row.vehicle) === normalizeVehicleKey(selectedVehicle)) &&
-      (!selectedLocation || row.location === selectedLocation) &&
+      matchesCompetitorRouteSelection(row, {
+        selectedPickupLocation,
+        selectedDropoffLocation,
+        selectedLocation
+      }) &&
       row.company === "elementsworld"
   );
 
@@ -1051,14 +1060,18 @@ export const buildExactTripMetrics = ({
   selectedPickup = "",
   selectedDropoff = "",
   selectedVehicle = "",
-  selectedLocation = ""
+  selectedLocation = "",
+  selectedPickupLocation = "",
+  selectedDropoffLocation = ""
 }) => {
   const selectedRow = selectExactTripRow({
     rows,
     selectedPickup,
     selectedDropoff,
     selectedVehicle,
-    selectedLocation
+    selectedLocation,
+    selectedPickupLocation,
+    selectedDropoffLocation
   });
   const duration =
     selectedPickup && selectedDropoff
@@ -2077,6 +2090,7 @@ function MarketSpreadChart({
 function DashboardApp() {
   const [rows, setRows] = useState([]);
   const [trendData, setTrendData] = useState([]);
+  const [trendLoading, setTrendLoading] = useState(true);
   const [trendActiveDateKey, setTrendActiveDateKey] = useState("");
   const [activeTab, setActiveTab] = useState("overview");
   const [isUiTransitioning, setIsUiTransitioning] = useState(false);
@@ -2240,6 +2254,7 @@ function DashboardApp() {
     let timerId = null;
 
     setLoading(true);
+    setTrendLoading(true);
     setLoadError("");
     const loadData = async () => {
       const controller = new AbortController();
@@ -2257,25 +2272,17 @@ function DashboardApp() {
           // "Same as Pick Up" is the default dropoff behavior.
           queryParams.set("dropoff_location", appliedPickupLocation);
         }
-        // Keep payloads bounded so seeded historical datasets stay responsive.
-        // Keep UI payloads small enough for browser parsing/rendering on hosted envs.
-        // Fast first paint: keep overview payload tight.
-        queryParams.set("max_pickup_dates", "14");
+        // Keep UI payloads bounded for responsive first paint.
+        queryParams.set("max_pickup_dates", String(OVERVIEW_MAX_PICKUP_DATES));
         const query = queryParams.toString() ? `?${queryParams.toString()}` : "";
         const pricesUrl = `${PRICING_API_BASE}/api/prices/latest${query}`;
         const trendsQueryParams = new URLSearchParams(queryParams);
-        // Trend view should show full route timeline, not the overview's narrow window.
-        if (activeTab === "trend") {
-          trendsQueryParams.delete("max_pickup_dates");
-        } else if (activeTab === "competitors") {
-          trendsQueryParams.set("max_pickup_dates", "60");
-        } else {
-          trendsQueryParams.set("max_pickup_dates", "7");
-        }
+        // Trend dataset can be larger than overview, but still needs a safe ceiling in browser.
+        trendsQueryParams.set("max_pickup_dates", String(TREND_MAX_PICKUP_DATES));
         const trendsQuery = trendsQueryParams.toString()
           ? `?${trendsQueryParams.toString()}`
           : "";
-        const trendsUrl = `${PRICING_API_BASE}/api/trends${trendsQuery}`;
+        const trendsUrl = `${PRICING_API_BASE}/api/prices/latest${trendsQuery}`;
         console.log("[DASHBOARD][API] Fetching price endpoints", { pricesUrl, trendsUrl });
 
         const pricesResponse = await fetch(pricesUrl, {
@@ -2347,30 +2354,37 @@ function DashboardApp() {
 
         setRows(cleanedRows);
         console.log("Prices count:", cleanedRows.length);
+        setLoading(false);
 
-        // Trend data is secondary; load it in background so initial render stays reliable.
-        try {
-          const trendsResponse = await fetch(trendsUrl, {
-            signal: controller.signal,
-            credentials: "include"
-          });
-          if (trendsResponse.ok) {
-            const trendsApiRows = await trendsResponse.json();
-            if (!cancelled) {
-              const cleanedTrendRows = toDashboardRows(trendsApiRows);
-              setTrendData(cleanedTrendRows);
-              console.log("Trends count:", cleanedTrendRows.length);
-            }
-          } else {
-            console.warn("[DASHBOARD][API] Trends endpoint failed", {
-              status: trendsResponse.status
+        // Trend data is secondary; load it in background so tab transitions stay fast.
+        void (async () => {
+          try {
+            const trendsResponse = await fetch(trendsUrl, {
+              signal: controller.signal,
+              credentials: "include"
             });
+            if (trendsResponse.ok) {
+              const trendsApiRows = await trendsResponse.json();
+              if (!cancelled) {
+                const cleanedTrendRows = toDashboardRows(trendsApiRows);
+                setTrendData(cleanedTrendRows);
+                console.log("Trends count:", cleanedTrendRows.length);
+              }
+            } else {
+              console.warn("[DASHBOARD][API] Trends endpoint failed", {
+                status: trendsResponse.status
+              });
+            }
+          } catch (trendError) {
+            if (!(trendError instanceof DOMException && trendError.name === "AbortError")) {
+              console.warn("[DASHBOARD][API] Trends fetch error", trendError);
+            }
+          } finally {
+            if (!cancelled) {
+              setTrendLoading(false);
+            }
           }
-        } catch (trendError) {
-          if (!(trendError instanceof DOMException && trendError.name === "AbortError")) {
-            console.warn("[DASHBOARD][API] Trends fetch error", trendError);
-          }
-        }
+        })();
       } catch (err) {
         if (err instanceof DOMException && err.name === "AbortError") {
           return;
@@ -2378,11 +2392,10 @@ function DashboardApp() {
         if (!cancelled) {
           console.error("API error:", err);
           setLoadError(err instanceof Error ? err.message : "Failed to fetch data from API");
-        }
-      } finally {
-        if (!cancelled) {
+          setTrendLoading(false);
           setLoading(false);
         }
+      } finally {
         window.clearTimeout(timeoutId);
         if (activeController === controller) {
           activeController = null;
@@ -2408,7 +2421,7 @@ function DashboardApp() {
         window.clearTimeout(timerId);
       }
     };
-  }, [dataReloadTrigger, appliedPickupLocation, appliedDropoffLocation, activeTab]);
+  }, [dataReloadTrigger, appliedPickupLocation, appliedDropoffLocation]);
 
   useEffect(() => {
     if (!loading) {
@@ -2551,15 +2564,7 @@ function DashboardApp() {
       setDashboard(initialDashboard);
       return;
     }
-    const relevantRows = [];
-
-    rows.forEach((row) => {
-      if (selectedLocationForLegacyFilters && row.location !== selectedLocationForLegacyFilters) {
-        return;
-      }
-
-      relevantRows.push(row);
-    });
+    const relevantRows = rows;
     console.log("FILTERED DATA:", relevantRows.length);
     console.log("Filters:", vehicle, selectedLocationForLegacyFilters, [selectedPickupDate, selectedDropoffDate]);
 
@@ -2569,10 +2574,21 @@ function DashboardApp() {
         config,
         adjustment,
         selectedDate: selectedPickupDate,
-        selectedVehicle: vehicle
+        selectedVehicle: vehicle,
+        selectedPickupLocation: appliedPickupLocation,
+        selectedDropoffLocation: appliedDropoffLocation || appliedPickupLocation
       })
     );
-  }, [adjustment, selectedLocationForLegacyFilters, rows, selectedPickupDate, selectedDropoffDate, vehicle]);
+  }, [
+    adjustment,
+    selectedLocationForLegacyFilters,
+    rows,
+    selectedPickupDate,
+    selectedDropoffDate,
+    vehicle,
+    appliedPickupLocation,
+    appliedDropoffLocation
+  ]);
 
   useEffect(() => {
     if (!trendData.length) {
@@ -2586,22 +2602,7 @@ function DashboardApp() {
       return;
     }
 
-    const relevantTrendRows = [];
-
-    trendData.forEach((row) => {
-      if (selectedLocationForLegacyFilters && row.location !== selectedLocationForLegacyFilters) {
-        const isElementsRow = normalize(row.company) === "elementsworld";
-        const matchesElementsLocation =
-          normalize(row.pickupLocation || row.location) === selectedLocationForLegacyFilters ||
-          normalize(row.dropoffLocation || row.location) === selectedLocationForLegacyFilters;
-        if (isElementsRow && matchesElementsLocation) {
-          relevantTrendRows.push(row);
-        }
-        return;
-      }
-
-      relevantTrendRows.push(row);
-    });
+    const relevantTrendRows = trendData;
     console.log("FILTERED DATA:", relevantTrendRows.length);
     console.log("Filters:", vehicle, selectedLocationForLegacyFilters);
 
@@ -2695,7 +2696,9 @@ function DashboardApp() {
     selectedPickup: selectedPickupDate,
     selectedDropoff: selectedDropoffDate,
     selectedVehicle: vehicle,
-    selectedLocation: selectedLocationForLegacyFilters
+    selectedLocation: selectedLocationForLegacyFilters,
+    selectedPickupLocation: appliedPickupLocation,
+    selectedDropoffLocation: appliedDropoffLocation || appliedPickupLocation
   });
   const effectivePickupRouteFilter = appliedPickupLocation || selectedLocationForLegacyFilters || "";
   const effectiveDropoffRouteFilter = appliedDropoffLocation || effectivePickupRouteFilter || "";
@@ -3707,7 +3710,7 @@ function DashboardApp() {
               </div>
             </div>
             <div className="chart-frame">
-              {loading ? (
+              {loading || trendLoading ? (
                 <div className="chart-empty">{"Loading market history\u2026"}</div>
               ) : (
                 <PriceTrendChart

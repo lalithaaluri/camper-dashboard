@@ -200,7 +200,7 @@ test("renders camper revenue dashboard", async () => {
       const requestUrl = String(url);
       return (
         requestUrl ===
-          "http://localhost:4302/api/trends?pickup_location=auckland&dropoff_location=auckland&max_pickup_dates=7" &&
+          "http://localhost:4302/api/prices/latest?pickup_location=auckland&dropoff_location=auckland&max_pickup_dates=120" &&
         options &&
         options.signal instanceof AbortSignal
       );
@@ -354,6 +354,50 @@ test("buildExactTripMetrics returns total price, duration, and daily rate only f
     dailyRate: null,
     hasExactMatch: false
   });
+});
+
+test("buildExactTripMetrics respects pickup/dropoff route combination", () => {
+  const rows = [
+    {
+      dateKey: "2026-05-01",
+      dropoffDateKey: "2026-05-05",
+      location: "auckland",
+      pickupLocation: "auckland",
+      dropoffLocation: "auckland",
+      hasExplicitPickupLocation: true,
+      hasExplicitDropoffLocation: true,
+      company: "elementsworld",
+      vehicle: "quad",
+      price: 360,
+      scrapeDate: new Date("2026-04-18")
+    },
+    {
+      dateKey: "2026-05-01",
+      dropoffDateKey: "2026-05-05",
+      location: "auckland",
+      pickupLocation: "auckland",
+      dropoffLocation: "christchurch",
+      hasExplicitPickupLocation: true,
+      hasExplicitDropoffLocation: true,
+      company: "elementsworld",
+      vehicle: "quad",
+      price: 680,
+      scrapeDate: new Date("2026-04-19")
+    }
+  ];
+
+  const metrics = buildExactTripMetrics({
+    rows,
+    selectedPickup: "2026-05-01",
+    selectedDropoff: "2026-05-05",
+    selectedVehicle: "quad",
+    selectedPickupLocation: "auckland",
+    selectedDropoffLocation: "christchurch"
+  });
+
+  expect(metrics.hasExactMatch).toBe(true);
+  expect(metrics.totalPrice).toBe(680);
+  expect(metrics.dailyRate).toBe(170);
 });
 
 test("getMappedCompetitors returns the normalized competitor list for the selected vehicle", () => {
@@ -801,6 +845,79 @@ test("buildDashboardFromRows falls back to available rows when latest date has n
   ]);
   expect(dashboard.summary.average).toBe(295);
   expect(dashboard.summary.recommended).toBe(310);
+});
+
+test("buildDashboardFromRows applies pickup/dropoff route combination filtering", () => {
+  const config = {
+    competitorVehicles: ["doubledown"]
+  };
+  const rows = [
+    {
+      dateKey: "2026-05-01",
+      dropoffDateKey: "2026-05-05",
+      company: "elementsworld",
+      vehicle: "quad",
+      price: 360,
+      location: "auckland",
+      pickupLocation: "auckland",
+      dropoffLocation: "auckland",
+      hasExplicitPickupLocation: true,
+      hasExplicitDropoffLocation: true,
+      scrapeDate: new Date("2026-04-19")
+    },
+    {
+      dateKey: "2026-05-01",
+      dropoffDateKey: "2026-05-05",
+      company: "mighty",
+      vehicle: "doubledown",
+      price: 400,
+      location: "auckland",
+      pickupLocation: "auckland",
+      dropoffLocation: "auckland",
+      hasExplicitPickupLocation: true,
+      hasExplicitDropoffLocation: true,
+      scrapeDate: new Date("2026-04-19")
+    },
+    {
+      dateKey: "2026-05-01",
+      dropoffDateKey: "2026-05-05",
+      company: "elementsworld",
+      vehicle: "quad",
+      price: 680,
+      location: "auckland",
+      pickupLocation: "auckland",
+      dropoffLocation: "christchurch",
+      hasExplicitPickupLocation: true,
+      hasExplicitDropoffLocation: true,
+      scrapeDate: new Date("2026-04-20")
+    },
+    {
+      dateKey: "2026-05-01",
+      dropoffDateKey: "2026-05-05",
+      company: "mighty",
+      vehicle: "doubledown",
+      price: 800,
+      location: "auckland",
+      pickupLocation: "auckland",
+      dropoffLocation: "christchurch",
+      hasExplicitPickupLocation: true,
+      hasExplicitDropoffLocation: true,
+      scrapeDate: new Date("2026-04-20")
+    }
+  ];
+
+  const dashboard = buildDashboardFromRows({
+    rows,
+    config,
+    adjustment: 0,
+    selectedDate: "2026-05-01",
+    selectedVehicle: "quad",
+    selectedPickupLocation: "auckland",
+    selectedDropoffLocation: "christchurch"
+  });
+
+  expect(dashboard.summary.lowest).toBe(200);
+  expect(dashboard.summary.elements).toBe(170);
 });
 
 test("buildDashboardFromRows bases recommendation on cheapest competitor and margin", () => {
