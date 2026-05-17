@@ -2276,8 +2276,8 @@ function DashboardApp() {
         queryParams.set("max_pickup_dates", String(OVERVIEW_MAX_PICKUP_DATES));
         const query = queryParams.toString() ? `?${queryParams.toString()}` : "";
         const pricesUrl = `${PRICING_API_BASE}/api/prices/latest${query}`;
-        const trendsQueryParams = new URLSearchParams(queryParams);
-        // Trend view should show a rolling 3-month history while staying responsive.
+        const trendsQueryParams = new URLSearchParams();
+        // Trend view should be global (not route-filtered) with rolling 3-month history.
         trendsQueryParams.set("max_pickup_dates", String(TREND_MAX_PICKUP_DATES));
         const trendsQuery = trendsQueryParams.toString()
           ? `?${trendsQueryParams.toString()}`
@@ -2612,9 +2612,7 @@ function DashboardApp() {
         config,
         adjustment,
         selectedDate: "",
-        selectedVehicle: vehicle,
-        selectedPickupLocation: appliedPickupLocation,
-        selectedDropoffLocation: appliedDropoffLocation || appliedPickupLocation
+        selectedVehicle: vehicle
       })
     );
   }, [
