@@ -1961,7 +1961,7 @@ function MarketSpreadChart({
         });
 
         return (
-          <svg width={safeWidth} height={height} role="img" aria-label="Market spread bar chart">
+          <svg width={safeWidth} height={height} role="img" aria-label="Market price range bar chart">
             <LinearGradient
               id="spread-surface"
               from="#f8f3ea"
@@ -2470,7 +2470,7 @@ function DashboardApp() {
         });
 
         if (!response.ok) {
-          throw new Error("Unable to reach scraper service");
+          throw new Error("Unable to reach data update service");
         }
 
         console.log("[DASHBOARD][HEALTH] health check success");
@@ -2516,7 +2516,7 @@ function DashboardApp() {
             error:
               error instanceof Error
                 ? error.message
-                : "Unable to reach scraper service"
+                : "Unable to reach data update service"
           }));
         }
       }
@@ -3250,7 +3250,7 @@ function DashboardApp() {
         throw new Error(payload.error || "Scrape request failed");
       }
 
-      setScrapeRunFeedback(`Scraper started... Run ID: ${payload.id}`);
+      setScrapeRunFeedback(`Price update started... Reference: ${payload.id}`);
       setScraperStatus((current) => ({
         ...current,
         activeRunId: payload.id,
@@ -3571,9 +3571,9 @@ function DashboardApp() {
             tone="amber"
           />
           <StatCard
-            label="Tracked pickups"
+            label="Tracked pickup dates"
             value={formatCount(dashboard.summary.trackedDates)}
-            detail={`${formatCount(dashboard.summary.observedQuotes)} competitor observations`}
+            detail={`${formatCount(dashboard.summary.observedQuotes)} competitor quotes`}
           />
             </section>
 
@@ -3588,7 +3588,7 @@ function DashboardApp() {
               </article>
 
               <article className="insight-card">
-                <span className="insight-card__label">Rate signal</span>
+                <span className="insight-card__label">Recommendation basis</span>
                 <h2>
                   {cheapestCompetitor === null
                     ? "No competitor daily-rate signal"
@@ -3629,8 +3629,8 @@ function DashboardApp() {
               <article className="panel">
                 <div className="panel__header">
                   <div>
-                    <span className="panel__eyebrow">Market spread</span>
-                    <h3>Cheapest competitor stack</h3>
+                    <span className="panel__eyebrow">Market price range</span>
+                    <h3>Lowest competitor comparison</h3>
                   </div>
                 </div>
                 <div className="chart-frame">
@@ -3812,7 +3812,7 @@ function DashboardApp() {
           <div className="panel__header">
             <div>
               <span className="panel__eyebrow">Quote table</span>
-              <h3>Competitor rows</h3>
+              <h3>Competitor quotes</h3>
             </div>
           </div>
 
@@ -3907,7 +3907,7 @@ function DashboardApp() {
                 ) : (
                   <tr>
                     <td colSpan="8" className="table-empty">
-                      No market rows available for selected date
+                      No market quotes available for selected date
                     </td>
                   </tr>
                 )}
@@ -3930,7 +3930,7 @@ function DashboardApp() {
           <div className="panel__header">
             <div>
               <span className="panel__eyebrow">Automation</span>
-              <h3>Australian Backpackers scraper</h3>
+              <h3>Competitor Price Update</h3>
             </div>
             <div className="scraper-health">
               <span
@@ -4004,7 +4004,7 @@ function DashboardApp() {
                   </label>
 
                   <label className="field">
-                    <span>Pickup window (days)</span>
+                    <span>Days to check ahead</span>
                     <input
                       type="number"
                       min="1"
@@ -4062,7 +4062,7 @@ function DashboardApp() {
                       checked={scrapeHeadless}
                       onChange={(event) => setScrapeHeadless(event.target.checked)}
                     />
-                    <span>Run in background (faster)</span>
+                    <span>Run in background</span>
                   </label>
                 </div>
               </div>
@@ -4074,7 +4074,7 @@ function DashboardApp() {
                   disabled={isScrapeRunActive || scrapeSelectedRoutes.length === 0}
                   onClick={() => triggerScrape()}
                 >
-                  Run price update
+                  Update prices now
                 </button>
                 <button
                   type="button"
@@ -4091,7 +4091,7 @@ function DashboardApp() {
                   className="action-button action-button--ghost"
                   onClick={refreshDataset}
                 >
-                  Sync latest data
+                  Refresh saved prices
                 </button>
               </div>
 
@@ -4099,31 +4099,31 @@ function DashboardApp() {
                 {scrapeRunFeedback ? <p className="scraper-panel__hint">{scrapeRunFeedback}</p> : null}
                 {latestRun ? (
                   <p className="scraper-panel__hint">
-                    Run ID: {latestRun.id} | Status: {runStatusLabel}
+                    Update reference: {latestRun.id} | Status: {runStatusLabel}
                   </p>
                 ) : null}
                 {isScrapeRunActive ? (
                   <p className="scraper-panel__hint">
-                    Scraper running... Rows processed:{" "}
-                    {formatCount(latestRun?.rowsProcessed || latestRun?.rowsCaptured || 0)} | Dates visited:{" "}
+                    Update running... Quotes checked:{" "}
+                    {formatCount(latestRun?.rowsProcessed || latestRun?.rowsCaptured || 0)} | Dates checked:{" "}
                     {formatCount(latestRun?.datesVisited || 0)}
                   </p>
                 ) : null}
               </div>
 
               {scraperStatus.error ? (
-                <p className="scraper-panel__hint">Backend not connected yet</p>
+                <p className="scraper-panel__hint">Data update service not connected yet</p>
               ) : (
                 <p className="scraper-panel__hint">
-                  Runs are fully automated in Playwright and write into the shared pricing
-                  database, with dashboard views loaded through the pricing API.
+                  Updates run automatically and save into the shared pricing database,
+                  with dashboard views loaded through the pricing service.
                 </p>
               )}
             </div>
 
             <div className="scraper-panel__summary">
                 <div className="scraper-stat">
-                  <span>Total dataset rows</span>
+                  <span>Total price records</span>
                   <strong>
                   {formatCount(
                     latestRun?.totalRows || apiDatasetRowCount || scraperStatus.dataset.rowCount || 0
@@ -4131,7 +4131,7 @@ function DashboardApp() {
                   </strong>
                 </div>
               <div className="scraper-stat">
-                <span>Latest pickup in dataset</span>
+                <span>Latest pickup date in records</span>
                 <strong>
                   {scraperStatus.dataset.latestPickupDate
                     ? formatDateLabel(scraperStatus.dataset.latestPickupDate, {
@@ -4141,7 +4141,7 @@ function DashboardApp() {
                 </strong>
               </div>
               <div className="scraper-stat">
-                <span>Latest scrape date</span>
+                <span>Last update date</span>
                 <strong>
                   {scraperStatus.dataset.latestScrapeDate
                     ? formatDateLabel(scraperStatus.dataset.latestScrapeDate, {
@@ -4151,11 +4151,11 @@ function DashboardApp() {
                 </strong>
               </div>
               <div className="scraper-stat">
-                <span>Rows processed this run</span>
+                <span>Quotes checked in this update</span>
                 <strong>{formatCount(latestRun?.rowsProcessed || latestRun?.rowsCaptured || 0)}</strong>
               </div>
               <div className="scraper-stat">
-                <span>Rows inserted this run</span>
+                <span>New quotes added in this update</span>
                 <strong>{formatCount(latestRun?.rowsInserted || 0)}</strong>
               </div>
               <div className="scraper-panel__last-run">
@@ -4163,20 +4163,20 @@ function DashboardApp() {
                   Last run: {latestRun?.status === "completed" ? "Completed" : runStatusLabel}
                 </p>
                 <p className="scraper-panel__hint">
-                  New rows: {formatCount(latestRun?.rowsInserted || 0)}
+                  New quotes: {formatCount(latestRun?.rowsInserted || 0)}
                 </p>
               </div>
               {rowsInsertedMessage ? (
                 <p className="scraper-panel__hint">
                   {Number(latestRun?.rowsInserted || 0) === 0
-                    ? "No new rows inserted (data already exists for this date range)"
+                    ? "No new quotes added (records already exist for this date range)"
                     : rowsInsertedMessage}
                 </p>
               ) : null}
 
               <div className="scraper-panel__links">
                 <a href={`${SCRAPER_API_BASE}/api/health`} target="_blank" rel="noreferrer">
-                  Open scraper health
+                  Open service status
                 </a>
                 <a href={`${PRICING_API_BASE}/api/prices`} target="_blank" rel="noreferrer">
                   View latest data
@@ -4187,7 +4187,7 @@ function DashboardApp() {
                     target="_blank"
                     rel="noreferrer"
                   >
-                    Open latest run rows
+                    Download latest update CSV
                   </a>
                 ) : null}
               </div>
@@ -4338,7 +4338,7 @@ function App() {
         >
           <h2 style={{ margin: "0 0 8px", color: "#1f3628" }}>Elements World Dashboard</h2>
           <p style={{ margin: "0 0 18px", color: "#475569" }}>
-            Sign in to access pricing controls and scraper actions.
+            Sign in to access pricing controls and data update actions.
           </p>
 
           <label style={{ display: "grid", gap: "6px", marginBottom: "12px" }}>
