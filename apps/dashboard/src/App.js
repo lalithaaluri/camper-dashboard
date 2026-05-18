@@ -99,7 +99,6 @@ const scrapeRouteOptions = [
   }
 ];
 
-const OVERVIEW_MAX_PICKUP_DATES = 14;
 
 const initialDashboard = {
   summary: {
@@ -2274,8 +2273,6 @@ function DashboardApp() {
           // "Same as Pick Up" is the default dropoff behavior.
           queryParams.set("dropoff_location", appliedPickupLocation);
         }
-        // Keep UI payloads bounded for responsive first paint.
-        queryParams.set("max_pickup_dates", String(OVERVIEW_MAX_PICKUP_DATES));
         const query = queryParams.toString() ? `?${queryParams.toString()}` : "";
         const pricesUrl = `${PRICING_API_BASE}/api/prices/latest${query}`;
         const trendQueryParams = new URLSearchParams();
@@ -2649,10 +2646,14 @@ function DashboardApp() {
   ).sort();
 
   useEffect(() => {
-    if (selectedDropoffDate && !dropoffOptions.includes(selectedDropoffDate)) {
+    if (
+      selectedDropoffDate &&
+      !dropoffOptions.includes(selectedDropoffDate) &&
+      !isDropoffUserSelected
+    ) {
       setSelectedDropoffDate("");
     }
-  }, [selectedDropoffDate, dropoffOptions]);
+  }, [selectedDropoffDate, dropoffOptions, isDropoffUserSelected]);
 
   useEffect(() => {
     if (!rows.length || pickupDate || dropoffDate) {
@@ -2680,24 +2681,14 @@ function DashboardApp() {
       return;
     }
 
-    const matchingRows = rows.filter(
-      (row) =>
-        row.dateKey === pickupDate &&
-        row.company === "elementsworld" &&
-        normalizeVehicleKey(row.vehicle) === normalizeVehicleKey(vehicle)
-    );
-
-    if (
-      selectedDropoffDate &&
-      matchingRows.some((row) => row.dropoffDateKey === selectedDropoffDate)
-    ) {
+    if (selectedDropoffDate && dropoffOptions.includes(selectedDropoffDate)) {
       return;
     }
 
-    if (!isDropoffUserSelected && matchingRows.length > 0) {
-      setSelectedDropoffDate(matchingRows[0].dropoffDateKey);
+    if (!isDropoffUserSelected && dropoffOptions.length > 0) {
+      setSelectedDropoffDate(dropoffOptions[0]);
     }
-  }, [pickupDate, selectedDropoffDate, isDropoffUserSelected, vehicle, rows]);
+  }, [pickupDate, selectedDropoffDate, isDropoffUserSelected, dropoffOptions]);
 
   const exactTripMetrics = buildExactTripMetrics({
     rows,

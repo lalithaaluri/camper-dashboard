@@ -220,7 +220,7 @@ test("renders camper revenue dashboard", async () => {
   );
   expect(screen.queryByText(/latest pickup date/i)).not.toBeInTheDocument();
   expect(global.fetch).toHaveBeenCalledWith(
-    "http://localhost:4302/api/prices/latest?pickup_location=auckland&dropoff_location=auckland&max_pickup_dates=14",
+    "http://localhost:4302/api/prices/latest?pickup_location=auckland&dropoff_location=auckland",
     expect.objectContaining({ signal: expect.any(AbortSignal) })
   );
   expect(
